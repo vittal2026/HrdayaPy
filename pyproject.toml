@@ -32,9 +32,10 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/vittal2026/hrdayapy"
-Repository = "https://github.com/vittal2026/hrdayapy"
-Issues = "https://github.com/vittal2026/hrdayapy/issues"
+[project.urls]
+Homepage = "https://github.com/vittal2026/HrdayaPy"
+Repository = "https://github.com/vittal2026/HrdayaPy"
+Issues = "https://github.com/vittal2026/HrdayaPy/issues"
 
 [tool.setuptools.packages.find]
 include = ["hrdayapy*"]

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hrdayapy"
-version = "0.1.0"
+version = "0.1.1"
 description = "Patient-specific cardiac electrophysiology pipeline: geometry/UVC coordinates, Purkinje network, monodomain simulation, forward ECG."
 readme = "README.md"
 license = "MIT"
@@ -14,9 +14,9 @@ authors = [
 ]
 requires-python = ">=3.10"
 
-# Only what hrdayapy.coordinates needs today. purkinje / simulation / ecg
-# will add torch (already listed, needed by coordinates too), pypardiso,
-# and scikit-sparse once those stages are migrated into the package.
+# scikit-sparse and pypardiso are not yet used by the current package code;
+# they live under the optional "sparse-solvers" extra below and will move
+# into the core dependencies once those pipeline stages are migrated in.
 dependencies = [
     "numpy",
     "scipy",
@@ -27,6 +27,10 @@ dependencies = [
     "pynrrd",
     "tqdm",
     "matplotlib",
+]
+
+[project.optional-dependencies]
+sparse-solvers = [
     "pypardiso",
     "scikit-sparse",
 ]

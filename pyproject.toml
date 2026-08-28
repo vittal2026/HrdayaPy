@@ -32,7 +32,6 @@ dependencies = [
 ]
 
 [project.urls]
-[project.urls]
 Homepage = "https://github.com/vittal2026/HrdayaPy"
 Repository = "https://github.com/vittal2026/HrdayaPy"
 Issues = "https://github.com/vittal2026/HrdayaPy/issues"

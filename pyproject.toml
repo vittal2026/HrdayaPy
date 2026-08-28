@@ -7,7 +7,7 @@ name = "hrdayapy"
 version = "0.1.0"
 description = "Patient-specific cardiac electrophysiology pipeline: geometry/UVC coordinates, Purkinje network, monodomain simulation, forward ECG."
 readme = "README.md"
-license = { text = "MIT" }
+license = "MIT"
 authors = [
     { name = "Vittal L. Rao", email = "vittal2026@gmail.com" },
     { name = "Ramarathnam Krishna Kumar" },

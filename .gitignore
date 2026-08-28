@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data / outputs (do not commit large or patient-derived files)
+*.nrrd
+*.npz
+*.vtk
+*.vtp
+*.npy
+outputs/
+*.log
+
+# Jupyter
+.ipynb_checkpoints/

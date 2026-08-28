@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hrdayapy"
+version = "0.1.0"
+description = "Patient-specific cardiac electrophysiology pipeline: geometry/UVC coordinates, Purkinje network, monodomain simulation, forward ECG."
+readme = "README.md"
+license = { text = "MIT" }
+authors = [
+    { name = "Vittal L. Rao", email = "vittal2026@gmail.com" },
+    { name = "Ramarathnam Krishna Kumar" },
+]
+requires-python = ">=3.10"
+
+# Only what hrdayapy.coordinates needs today. purkinje / simulation / ecg
+# will add torch (already listed, needed by coordinates too), pypardiso,
+# and scikit-sparse once those stages are migrated into the package.
+dependencies = [
+    "numpy",
+    "scipy",
+    "torch",
+    "pyvista",
+    "vtk",
+    "scikit-image",
+    "pynrrd",
+    "tqdm",
+    "matplotlib",
+    "pypardiso",
+    "scikit-sparse",
+]
+
+[project.urls]
+Homepage = "https://github.com/vittal2026/hrdayapy"
+Repository = "https://github.com/vittal2026/hrdayapy"
+Issues = "https://github.com/vittal2026/hrdayapy/issues"
+
+[tool.setuptools.packages.find]
+include = ["hrdayapy*"]

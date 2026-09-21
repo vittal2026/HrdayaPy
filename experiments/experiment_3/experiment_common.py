@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """
 experiments/experiment_common.py
 ===================================================================
@@ -18,10 +19,50 @@ between experiments that motivated this refactor:
   - REF_DX_P / REF_DX_M / REF_DT previously disagreed with the grid
     Experiment 2 actually reported as its "level 0" (0.3152 mm vs the
     stale 0.5 mm default) -- now defined once, in base_values.py.
-  - SIGMA_M / SIGMA_P previously risked drifting from the (deleted)
-    production config.py without anyone noticing -- now defined once,
-    in base_values.py, with call_print_base_values() available so every
-    run echoes the live values to its console output / log.
+  - SIGMA_P previously risked drifting from the (deleted) production
+    config.py without anyone noticing -- now defined once, in
+    base_values.py, with print_base_values() available so every run
+    echoes the live values to its console output / log.
+
+ANISOTROPIC PORT (this revision)
+-----------------------------------------------------------------
+The myocardium is now solved with hrdayapy's ANISOTROPIC solver
+(hrdayapy.anisotropic_simulation.compute_anisotropic_coupled), not the
+isotropic hrdayapy.simulation.compute_coupled these experiments
+originally used -- see base_values.py's module docstring for the full
+rationale (SIGMA_M is retired; SIGMA_L/SIGMA_T/FIBRE_DIRECTION are
+taken directly from niederer_values.py, fibre uniform along Z, the
+slab's long axis). Concretely, relative to the pre-anisotropic version
+of this file:
+
+  - build_myocardium() now also returns a per-voxel fibre_dir array
+    (uniform along FIBRE_DIRECTION), fourth return value.
+  - run_one() / run_directional() now call compute_anisotropic_coupled
+    with sigma_l/sigma_t + fibre_dir instead of compute_coupled with a
+    single sigma_M, and load_vm_snapshots/compute_activation_maps are
+    imported from hrdayapy.anisotropic_simulation.functions (matching
+    niederer_common.run_niederer's pattern) rather than
+    hrdayapy.simulation.functions.
+  - Both wrappers now undo the anisotropic solver's own internal
+    Purkinje-tree axis convention on the returned myocardial
+    coordinates (a swap of array axes 0 and 1) immediately after
+    computing activation maps -- see base_values.py's module docstring
+    and niederer_common.run_niederer() for the same correction applied
+    there. Everything downstream of that point (CV fits, PMJ-coupled-
+    node lookup, capture/delay analysis) already assumes the raw,
+    un-swapped array-axis frame that P_ROOT/P_GRAZE/P_PMJ are defined
+    in, so this correction MUST happen inside run_one/run_directional,
+    not downstream.
+  - Only run_directional() (Experiment 4's solve wrapper) has actually
+    been exercised against the anisotropic solver as part of this
+    port -- run_experiment2.py/run_experiment3.py (not touched here)
+    still call run_one() positionally with a single conductivity
+    argument; that call site will need updating to pass sigma_l/
+    sigma_t before Experiments 2/3 are themselves re-run on the
+    anisotropic solver, and Experiment 3's sweep design (currently "a
+    single sigma_M value") needs its own rethink for two independent
+    conductivities -- both deliberately OUT OF SCOPE for this revision,
+    which targets Experiment 4 only.
 
 Experiments 2, 3, and 4 all run on the SAME coupled Purkinje-fibre +
 myocardial-slab geometry (build_myocardium / build_purkinje below) and
@@ -31,11 +72,12 @@ estimate_purkinje_cv). They differ only in which parameter is swept:
 
   - Experiment 2 sweeps discretisation (dt, dx_p, dx_m) at fixed
     conductivity (run_experiment2.py).
-  - Experiment 3 sweeps conductivity (sigma_M, sigma_P) at fixed
-    discretisation (run_experiment3.py).
+  - Experiment 3 sweeps conductivity at fixed discretisation
+    (run_experiment3.py) -- sweep design TBD post-anisotropy, see above.
   - Experiment 4 sweeps PMJ coupling conductance (c_pmj) and coupled-
     node count (n_pmj), in both the orthodromic and antidromic
-    directions, at fixed discretisation (run_experiment4.py).
+    directions, at fixed discretisation and fixed (sigma_l, sigma_t)
+    (run_experiment4.py).
 
 This module owns everything that is identical across all three:
 
@@ -44,12 +86,11 @@ This module owns everything that is identical across all three:
   2. Shared physical/discretisation parameters
        -- imported from base_values.py, not redefined here.
   3. The single-run solve wrappers
-       run_one()          -- c_pmj/n_pmj default to base_values.py but are
-                              overridable per-call (Experiments 2, 3; Exp. 3
-                              uses a local override, see its own docstring)
+       run_one()          -- fixed c_pmj/n_pmj (Experiments 2, 3)
        run_directional()  -- call-time c_pmj/n_pmj/direction (Exp. 4)
-     Both build geometry, call hrdayapy.simulation.compute_coupled,
-     and extract per-node activation times in both domains.
+     Both build geometry, call
+     hrdayapy.anisotropic_simulation.compute_anisotropic_coupled, and
+     extract per-node activation times in both domains.
   4. Purkinje trace assembly / threshold-crossing helpers
        purkinje_ordered_trace, first_crossing_times
   5. CV estimation restricted to the "Eikonal-like" interior region
@@ -72,13 +113,16 @@ from pathlib import Path
 
 import numpy as np
 
-from hrdayapy.simulation import compute_coupled
-from hrdayapy.simulation.functions import (
-    load_vm_snapshots, compute_activation_maps, save_activation_maps,
+from hrdayapy.anisotropic_simulation import compute_anisotropic_coupled
+from hrdayapy.anisotropic_simulation.functions import (
+    load_vm_snapshots, compute_activation_maps,
 )
 # Same interpolated-threshold-crossing routine the myocardial activation
 # maps use, applied here to the Purkinje branch traces too, so both
-# domains get activation times from an identical algorithm.
+# domains get activation times from an identical algorithm. This helper is
+# a generic Vm/t threshold-crossing interpolator, not specific to the
+# isotropic solver, so it is still sourced from hrdayapy.simulation
+# (there is no anisotropic-specific copy).
 from hrdayapy.simulation.functions.activation_maps import _interp_crossings
 
 # =============================================================================
@@ -86,9 +130,13 @@ from hrdayapy.simulation.functions.activation_maps import _interp_crossings
 # Do NOT redefine any of these locally in this file or in any
 # run_experimentN.py; if a value needs to change, change it in
 # base_values.py so all three experiments pick it up identically.
+#
+# SIGMA_M is gone (retired -- see base_values.py's module docstring);
+# SIGMA_L / SIGMA_T / FIBRE_DIRECTION are the anisotropic myocardial
+# conductivity pair + fibre field that replace it.
 # =============================================================================
 from base_values import (
-    SIGMA_P, SIGMA_M, CM, A_M, R_P, A_P,
+    SIGMA_P, SIGMA_L, SIGMA_T, FIBRE_DIRECTION, CM, A_M, R_P,
     C_PMJ, N_PMJ, ACT_THRESHOLD,
     REF_DT, REF_DX_P, REF_DX_M,
     STIM_LEN_MM, STIM_AMP, STIM_DUR,
@@ -115,7 +163,7 @@ VM_SAVE_DT = 0.05   # ms
 # =============================================================================
 # Fixed geometry (not swept by any of the three experiments)
 # =============================================================================
-SLAB_X_MM, SLAB_Y_MM, SLAB_Z_MM = 10.0, 10.0, 50.0   # myocardial slab, long axis z
+SLAB_X_MM, SLAB_Y_MM, SLAB_Z_MM = 2.5, 2.5, 50.0   # myocardial slab, long axis z
 
 # Experiment 4: far-field myocardial ectopic stimulus used for the
 # ANTIDROMIC (myocardium -> Purkinje) capture/delay protocol. Placed near
@@ -131,7 +179,7 @@ SLAB_X_MM, SLAB_Y_MM, SLAB_Z_MM = 10.0, 10.0, 50.0   # myocardial slab, long axi
 ANTI_STIM_OFFSET_FROM_FAR_MM = 4.0   # set-in distance from the far (z=SLAB_Z_MM) face
 ANTI_STIM_RADIUS_MM          = 2.0   # matches STIM_LEN_MM, for a fair comparison
 ANTI_STIM_TARGET_MM = np.array(
-    [5.0, 5.0, SLAB_Z_MM - ANTI_STIM_OFFSET_FROM_FAR_MM])   # (5, 5, 46) mm
+    [1.25, 1.25, SLAB_Z_MM - ANTI_STIM_OFFSET_FROM_FAR_MM])   # (1.25, 1.25, 46) mm
 
 # =============================================================================
 # Output location -- each experiment writes to its own outputs/ directory,
@@ -154,6 +202,14 @@ def build_myocardium(dx_m: float):
     (homogeneous endocardial TTP06 throughout -- a single cell type,
     matching standard CV-benchmark practice).
 
+    Also returns fibre_dir, a per-voxel (Nx, Ny, Nz, 3) fibre-direction
+    field, uniform along base_values.FIBRE_DIRECTION (Z, the slab's long
+    axis, SLAB_Z_MM) wherever S==1 -- required by the anisotropic solver
+    (hrdayapy.anisotropic_simulation.compute_anisotropic_coupled), which
+    takes SIGMA_L/SIGMA_T + this per-voxel fibre field instead of a single
+    isotropic SIGMA_M. Same pattern as
+    niederer_common.build_niederer_myocardium's fibre_dir construction.
+
     The slab's own (x=0..SLAB_X_MM, y=0..SLAB_Y_MM, z=0..SLAB_Z_MM) physical
     frame starts at voxel index MYO_PAD_VOX in the padded array -- see
     physical_to_voxel_idx() for the corresponding coordinate transform used
@@ -166,9 +222,13 @@ def build_myocardium(dx_m: float):
     S[MYO_PAD_VOX:-MYO_PAD_VOX, MYO_PAD_VOX:-MYO_PAD_VOX, MYO_PAD_VOX:-MYO_PAD_VOX] = 1
     Z = S.copy()
     phi = np.zeros((Nx, Ny, Nz), dtype=np.float32)
+
+    fibre_dir = np.zeros((Nx, Ny, Nz, 3), dtype=np.float32)
+    fibre_dir[S == 1] = FIBRE_DIRECTION   # uniform, along array axis 2 (= long/Z axis)
+
     print(f"  Myocardium grid: {Nx} x {Ny} x {Nz} = {Nx*Ny*Nz:,} voxels "
-          f"(incl. {MYO_PAD_VOX}-voxel padding) @ dx_m={dx_m} mm")
-    return S, Z, phi
+          f"(incl. {MYO_PAD_VOX}-voxel padding) @ dx_m={dx_m} mm, fibre || Z")
+    return S, Z, phi, fibre_dir
 
 
 def physical_to_voxel_idx(points_mm: np.ndarray, dx_m: float) -> np.ndarray:
@@ -260,35 +320,40 @@ def first_crossing_times(Vm: np.ndarray, t: np.ndarray, threshold: float) -> np.
 
 
 # =============================================================================
-# Single-run solve wrapper -- c_pmj/n_pmj default to base_values.py,
-# overridable per-call (Experiments 2 and 3)
+# Single-run solve wrapper -- fixed c_pmj/n_pmj (Experiments 2 and 3)
 # =============================================================================
-def run_one(sigma_M: float, sigma_P: float, dt: float, dx_p: float, dx_m: float,
-            T: float, tag: str, out_dir: Path,
-            c_pmj: float | None = None, n_pmj: int | None = None) -> dict:
+def run_one(sigma_l: float, sigma_t: float, sigma_P: float, dt: float, dx_p: float,
+            dx_m: float, T: float, tag: str, out_dir: Path,
+            delete_intermediate_files: bool = True) -> dict:
     """
     Build the coupled Purkinje-fibre + myocardial-slab geometry at the
-    requested (dx_p, dx_m), solve with the requested (sigma_M, sigma_P, dt,
-    T), and return per-node activation-time arrays for both domains.
-    PMJ coupling defaults to the base_values.py defaults (C_PMJ, N_PMJ),
-    but can be overridden per-call via c_pmj / n_pmj -- e.g. Experiment 3
-    passes a locally higher c_pmj at its scale=2.0 joint-sweep point to
-    resolve a source-sink mismatch there, WITHOUT touching the shared
-    base_values.py default that Experiment 2 (and Experiment 4's own
-    reference point) still relies on.
+    requested (dx_p, dx_m), solve with the requested (sigma_l, sigma_t,
+    sigma_P, dt, T) on the ANISOTROPIC solver, and return per-node
+    activation-time arrays for both domains. PMJ coupling is fixed at the
+    base_values.py defaults (C_PMJ, N_PMJ).
 
-    Used unchanged by:
-      - run_experiment2.py, sweeping (dt, dx_p, dx_m) at fixed sigma
-      - run_experiment3.py, sweeping (sigma_M, sigma_P) at fixed discretisation,
-        with an optional local c_pmj override
+    NOTE on the anisotropic port: this signature has changed (sigma_M ->
+    sigma_l, sigma_t) as part of porting Experiment 4 to the anisotropic
+    solver (see this module's docstring). run_experiment2.py and
+    run_experiment3.py's call sites have NOT been updated as part of this
+    change -- they will need to pass sigma_l/sigma_t explicitly before
+    Experiments 2/3 themselves run on the anisotropic solver.
 
     out_dir must be passed explicitly by the caller (each experiment's own
     outputs/ directory) -- there is no shared default across experiments.
-    """
-    c_pmj = C_PMJ if c_pmj is None else c_pmj
-    n_pmj = N_PMJ if n_pmj is None else n_pmj
 
-    S, Z, phi = build_myocardium(dx_m)
+    delete_intermediate_files (default True): the three full-field npz
+    files this writes (coupled_{tag}.npz, vm_snapshots_{tag}.npz,
+    activation_maps_{tag}.npz) are pure scratch -- nothing downstream of
+    this function (run_experimentN.py's save_results()) ever reads them
+    again; only the scalar/per-node arrays returned here are used. Left
+    alone, a full sweep (many tags, each holding O(T/vm_save_dt x N_myo)
+    Vm data) accumulates disk usage roughly linearly in sweep size with
+    no benefit. Set False only if you specifically want to keep the raw
+    Vm fields around afterwards (e.g. for a one-off animation/debug pass
+    on a single tag) -- do not disable this globally for a full sweep.
+    """
+    S, Z, phi, fibre_dir = build_myocardium(dx_m)
     nodes, elements, act_times = build_purkinje(dx_m)
 
     n_steps = int(round(T / dt))
@@ -297,29 +362,38 @@ def run_one(sigma_M: float, sigma_P: float, dt: float, dx_p: float, dx_m: float,
 
     vm_save_dt = max(dt, VM_SAVE_DT)  # never save Vm snapshots more finely than needed
 
+    coupled_path = out_dir / f"coupled_{tag}.npz"
+    vm_path = out_dir / f"vm_snapshots_{tag}.npz"
+    act_map_path = out_dir / f"activation_maps_{tag}.npz"
+
     t0 = time.time()
-    results = compute_coupled(
+    results = compute_anisotropic_coupled(
         nodes=nodes, elements=elements, act_times=act_times,
-        S=S, Z=Z, phi=phi,
-        stim_protocol=stim_protocol,
+        S=S, Z=Z, phi=phi, fibre_dir=fibre_dir,
+        stim_protocol=stim_protocol, ectopic_region=None,
         voxel_size=dx_m, dx_p=dx_p,
-        sigma_P=sigma_P, sigma_M=sigma_M, Cm=CM, A_P=A_P, A_M=A_M, R_P=R_P,
+        sigma_P=sigma_P, sigma_l=sigma_l, sigma_t=sigma_t,
+        Cm=CM, A_M=A_M, R_P=R_P,
         dt=dt, T=T, theta=THETA,
-        stim_len_mm=STIM_LEN_MM, c_pmj=c_pmj, n_pmj=n_pmj,
+        stim_len_mm=STIM_LEN_MM, c_pmj=C_PMJ, n_pmj=N_PMJ,
         cg_tol=CG_TOL, cg_max_iter=CG_MAX_ITER,
         n_frames=n_steps,
-        save_path=out_dir / f"coupled_{tag}.npz",
+        save_path=coupled_path,
         vm_save_dt=vm_save_dt,
-        vm_save_path=out_dir / f"vm_snapshots_{tag}.npz",
+        vm_save_path=vm_path,
     )
     print(f"    solve wall-clock: {time.time() - t0:.1f} s")
 
-    vm_snap = load_vm_snapshots(out_dir / f"vm_snapshots_{tag}.npz")
+    vm_snap = load_vm_snapshots(vm_path)
     myo_maps = compute_activation_maps(
         vm_snap, S, act_threshold=ACT_THRESHOLD, deact_threshold=ACT_THRESHOLD,
-        save_path=out_dir / f"activation_maps_{tag}.npz",
+        save_path=act_map_path,
     )
     myo_coords = myo_maps.coords_mm
+    myo_coords = myo_coords[:, [1, 0, 2]]  # undo anisotropic solver's Purkinje-tree
+                                            # axis convention -- see base_values.py's
+                                            # module docstring and niederer_common's
+                                            # run_niederer() for the same correction
     if myo_maps.activation_times.shape[1] == 0:
         print("    WARNING: no myocardial node activated within T.")
         myo_act = np.full(myo_maps.N_myo, np.nan, dtype=np.float32)
@@ -328,6 +402,15 @@ def run_one(sigma_M: float, sigma_P: float, dt: float, dx_p: float, dx_m: float,
 
     p_coords, p_arc_length, p_Vm, p_t = purkinje_ordered_trace(results)
     p_act = first_crossing_times(p_Vm, p_t, ACT_THRESHOLD)
+
+    # Free the large in-memory Vm arrays now that activation times have
+    # been extracted from them -- don't rely on Python's GC to get to
+    # this before the next sweep iteration's arrays are allocated.
+    del results, vm_snap, myo_maps, p_Vm
+
+    if delete_intermediate_files:
+        for p in (coupled_path, vm_path, act_map_path):
+            p.unlink(missing_ok=True)
 
     return dict(myo_coords=myo_coords, myo_act=myo_act,
                 p_arc_length=p_arc_length, p_act=p_act)
@@ -621,9 +704,10 @@ def pmj_capture_delay(myo_coords: np.ndarray, myo_act: np.ndarray, p_act: np.nda
                 pmj_delay_ms=delay_ms)
 
 
-def run_directional(sigma_M: float, sigma_P: float, dt: float, dx_p: float, dx_m: float,
-                     T: float, tag: str, c_pmj: float, n_pmj: int, direction: str,
-                     out_dir: Path) -> dict:
+def run_directional(sigma_l: float, sigma_t: float, sigma_P: float, dt: float,
+                     dx_p: float, dx_m: float, T: float, tag: str, c_pmj: float,
+                     n_pmj: int, direction: str, out_dir: Path,
+                     delete_intermediate_files: bool = True) -> dict:
     """
     Drop-in generalisation of run_one() for Experiment 4: same geometry and
     activation-time extraction, but (c_pmj, n_pmj) are call-time parameters
@@ -631,13 +715,27 @@ def run_directional(sigma_M: float, sigma_P: float, dt: float, dx_p: float, dx_m
     selects the orthodromic (Purkinje-root) or antidromic (far-field
     myocardial ectopic) stimulus protocol -- see the module docstring above.
 
+    Runs on the ANISOTROPIC solver (sigma_l/sigma_t + a per-voxel fibre
+    field uniform along Z, the slab's long axis, matching base_values.py's
+    FIBRE_DIRECTION) -- see this module's docstring for what changed
+    relative to the pre-anisotropic version. Experiment 4 fixes
+    (sigma_l, sigma_t) at base_values.SIGMA_L/SIGMA_T and sweeps only
+    c_pmj/n_pmj/direction, per the manuscript's Section 2.11.4 scope.
+
     Returns everything run_one() returns, plus the PMJ capture/delay
     summary from pmj_capture_delay().
+
+    delete_intermediate_files (default True): see run_one()'s docstring --
+    same rationale applies here, and matters MORE for Experiment 4 since
+    its coarse+fine sweep calls this dozens of times per run_experiment4.py
+    invocation. run_cell() (run_experiment4.py) only keeps the scalar
+    summary dict this function returns; the three full-field npz files
+    written per tag are never read again afterwards.
     """
     if direction not in DIRECTIONS:
         raise ValueError(f"direction must be one of {DIRECTIONS}, got {direction!r}")
 
-    S, Z, phi = build_myocardium(dx_m)
+    S, Z, phi, fibre_dir = build_myocardium(dx_m)
     nodes, elements, act_times = build_purkinje(dx_m)
 
     ectopic_region = None
@@ -655,29 +753,39 @@ def run_directional(sigma_M: float, sigma_P: float, dt: float, dx_p: float, dx_m
 
     n_steps = int(round(T / dt))
     vm_save_dt = max(dt, VM_SAVE_DT)  # never save Vm snapshots more finely than needed
+
+    coupled_path = out_dir / f"coupled_{tag}.npz"
+    vm_path = out_dir / f"vm_snapshots_{tag}.npz"
+    act_map_path = out_dir / f"activation_maps_{tag}.npz"
+
     t0 = time.time()
-    results = compute_coupled(
+    results = compute_anisotropic_coupled(
         nodes=nodes, elements=elements, act_times=act_times,
-        S=S, Z=Z, phi=phi,
+        S=S, Z=Z, phi=phi, fibre_dir=fibre_dir,
         stim_protocol=stim_protocol, ectopic_region=ectopic_region,
         voxel_size=dx_m, dx_p=dx_p,
-        sigma_P=sigma_P, sigma_M=sigma_M, Cm=CM, A_P=A_P, A_M=A_M, R_P=R_P,
+        sigma_P=sigma_P, sigma_l=sigma_l, sigma_t=sigma_t,
+        Cm=CM, A_M=A_M, R_P=R_P,
         dt=dt, T=T, theta=THETA,
         stim_len_mm=STIM_LEN_MM, c_pmj=c_pmj, n_pmj=n_pmj,
         cg_tol=CG_TOL, cg_max_iter=CG_MAX_ITER,
         n_frames=n_steps,
-        save_path=out_dir / f"coupled_{tag}.npz",
+        save_path=coupled_path,
         vm_save_dt=vm_save_dt,
-        vm_save_path=out_dir / f"vm_snapshots_{tag}.npz",
+        vm_save_path=vm_path,
     )
     print(f"    [{direction}] solve wall-clock: {time.time() - t0:.1f} s")
 
-    vm_snap = load_vm_snapshots(out_dir / f"vm_snapshots_{tag}.npz")
+    vm_snap = load_vm_snapshots(vm_path)
     myo_maps = compute_activation_maps(
         vm_snap, S, act_threshold=ACT_THRESHOLD, deact_threshold=ACT_THRESHOLD,
-        save_path=out_dir / f"activation_maps_{tag}.npz",
+        save_path=act_map_path,
     )
     myo_coords = myo_maps.coords_mm
+    myo_coords = myo_coords[:, [1, 0, 2]]  # undo anisotropic solver's Purkinje-tree
+                                            # axis convention -- see base_values.py's
+                                            # module docstring and niederer_common's
+                                            # run_niederer() for the same correction
     if myo_maps.activation_times.shape[1] == 0:
         print("    WARNING: no myocardial node activated within T.")
         myo_act = np.full(myo_maps.N_myo, np.nan, dtype=np.float32)
@@ -688,6 +796,15 @@ def run_directional(sigma_M: float, sigma_P: float, dt: float, dx_p: float, dx_m
     p_act = first_crossing_times(p_Vm, p_t, ACT_THRESHOLD)
 
     pmj_result = pmj_capture_delay(myo_coords, myo_act, p_act, p_arc_length, dx_m, n_pmj, direction)
+
+    # Free the large in-memory Vm arrays now that activation times have
+    # been extracted from them -- don't rely on Python's GC to get to
+    # this before the next sweep cell's arrays are allocated.
+    del results, vm_snap, myo_maps, p_Vm
+
+    if delete_intermediate_files:
+        for p in (coupled_path, vm_path, act_map_path):
+            p.unlink(missing_ok=True)
 
     return dict(myo_coords=myo_coords, myo_act=myo_act,
                 p_arc_length=p_arc_length, p_act=p_act,

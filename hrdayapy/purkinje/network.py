@@ -21,7 +21,7 @@ def compute_network(
     phi,
     psi,
     *,
-    n_term: int = 650,
+    n_term: int = 750,
     n_con_max: int = 20,
     theta_max: float = 63.0,
     cond_vel: float = 340.0,
@@ -178,6 +178,8 @@ def compute_biventricular_networks(
     phi, psi,
     *,
     n_term: int = 650,
+    lv_n_term: int | None = None,
+    rv_n_term: int | None = None,
     n_con_max: int = 20,
     theta_max: float = 63.0,
     cond_vel: float = 340.0,
@@ -235,7 +237,17 @@ def compute_biventricular_networks(
         Chamber-restricted myocardium masks.
     phi, psi : np.ndarray
         Transmural / apicobasal coordinates (shared by both chambers).
-    (see create_purkinje's docstring for n_term..surface_depth_vox)
+    n_term : int
+        Target terminal-branch count used for BOTH chambers, unless
+        overridden below. Kept as a single shared default so existing
+        calls that only pass n_term keep working unchanged.
+    lv_n_term, rv_n_term : int or None
+        Per-chamber override of n_term -- e.g. the LV tree is usually
+        grown with more terminals than the RV (thicker, larger free
+        wall). Pass lv_n_term=900, rv_n_term=500 (say) to size each
+        chamber independently; leave as None (default) to fall back to
+        the shared `n_term` for that chamber.
+    (see create_purkinje's docstring for n_con_max..surface_depth_vox)
     myocardium_mask : np.ndarray or None
         The whole, unsplit myocardium mask (e.g. plain `S`, before
         splitting into S_lv/S_rv). When surface_depth_vox is set, both
@@ -262,26 +274,28 @@ def compute_biventricular_networks(
     -------
     (lv_nodes, lv_elements, lv_act), (rv_nodes, rv_elements, rv_act)
     """
-    kwargs = dict(
-        n_term=n_term, n_con_max=n_con_max, theta_max=theta_max,
+    common_kwargs = dict(
+        n_con_max=n_con_max, theta_max=theta_max,
         cond_vel=cond_vel, resolution=resolution, depth=depth,
         max_height=max_height, pkn_diff=pkn_diff,
         min_seg_length=min_seg_length, max_seg_length=max_seg_length,
         surface_depth_vox=surface_depth_vox,
         surface_reference_mask=myocardium_mask,
     )
+    lv_kwargs = dict(common_kwargs, n_term=n_term if lv_n_term is None else lv_n_term)
+    rv_kwargs = dict(common_kwargs, n_term=n_term if rv_n_term is None else rv_n_term)
 
     if not parallel:
         lv_nodes, lv_elements, lv_act = create_purkinje(
             root=tuple(float(c) for c in lv_root), voxel_mat=S_lv,
-            transmural=phi, apicobasal=psi, verbose=verbose, **kwargs,
+            transmural=phi, apicobasal=psi, verbose=verbose, **lv_kwargs,
         )
         if lv_save_path is not None:
             save_purkinje(str(lv_save_path), lv_nodes, lv_elements, lv_act)
 
         rv_nodes, rv_elements, rv_act = create_purkinje(
             root=tuple(float(c) for c in rv_root), voxel_mat=S_rv,
-            transmural=phi, apicobasal=psi, verbose=verbose, **kwargs,
+            transmural=phi, apicobasal=psi, verbose=verbose, **rv_kwargs,
         )
         if rv_save_path is not None:
             save_purkinje(str(rv_save_path), rv_nodes, rv_elements, rv_act)
@@ -292,9 +306,9 @@ def compute_biventricular_networks(
     from concurrent.futures import ProcessPoolExecutor
 
     lv_payload = dict(label="LV", root=lv_root, S=S_lv, phi=phi, psi=psi,
-                       kwargs=kwargs, save_path=lv_save_path, tqdm_position=0)
+                       kwargs=lv_kwargs, save_path=lv_save_path, tqdm_position=0)
     rv_payload = dict(label="RV", root=rv_root, S=S_rv, phi=phi, psi=psi,
-                       kwargs=kwargs, save_path=rv_save_path, tqdm_position=1)
+                       kwargs=rv_kwargs, save_path=rv_save_path, tqdm_position=1)
 
     ctx  = mp.get_context("spawn")
     lock = ctx.RLock()   # shared so LV's and RV's bars don't corrupt each other's row

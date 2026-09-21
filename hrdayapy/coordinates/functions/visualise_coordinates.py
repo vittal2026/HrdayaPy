@@ -1,47 +1,60 @@
 """
-visualise_coordinates.py
-=========================
-Unified PyVista visualisation of the four coordinate fields on the
-surface of a user-defined cut mask Z, in a single 2x2 linked-camera
-window:
+visualise_coordinates_transmural_apicobasal.py
+================================================
+Slimmed-down PyVista visualisation showing only the two "smooth" UVC
+fields -- transmural (phi) and apicobasal (psi) -- side by side in a
+single 1x2 linked-camera window:
 
-    top-left      phi    transmural     0 = endocardium, 1 = epicardium
-    top-right     psi    apicobasal     0 = apex,         1 = base
-    bottom-left   chi    biventricular  0 = LV,           1 = RV
-    bottom-right  theta  rotational     0 .. 2*pi, septum-anchored
+    left    phi    transmural     0 = endocardium, 1 = epicardium
+    right   psi    apicobasal     0 = apex,         1 = base
 
-`Z` is whatever subset of the myocardium you want rendered -- typically
-the Slicer-exported mask loaded from cfg.CUT_MASK_PATH (see
-run_step_1b_cut_mask). This module does not compute its own cut: it
-renders exactly the voxels in `Z`. Earlier versions derived an
-automatic SVD-based half-plane cut from S on every call, which is why
-changing CUT_MASK_PATH in config.py had no visible effect -- that cut
-never read the file at all.
+chi (biventricular) and theta (rotational) are not rendered -- this is
+the deliberate difference from visualise_coordinates.py, not an
+oversight. No bounding box is drawn either: only the surface itself,
+so nothing in the render distracts from the two colour fields.
 
-The theta (rotational) subplot can be rendered on a different mask via
-the optional `Z_theta` argument -- e.g. the full uncut myocardium mask
-S, when you want to see the full 0..2*pi wrap-around rather than just
-the cut-open view. phi/psi/chi always render on `Z`.
+Drop-in compatibility
+----------------------
+`visualise_coordinates` here has the *same call signature* as the
+original 2x2, four-field version (Z, phi, psi, chi, theta, Z_theta, and
+all the smoothing/geometry kwargs), so it can be substituted in for
+that module directly -- rename this file to visualise_coordinates.py
+(or import it under that name) and existing call sites need no changes.
 
-Surface construction
----------------------
-Surfaces are built with the same marching-cubes-on-a-blurred-mask
-approach as plot_activation_maps.py, rather than the old
-pv.ImageData -> cell threshold -> extract_surface pipeline. A
-cell-thresholded voxel-cube surface stays stair-stepped even after
-Taubin smoothing, since every face starts out axis-aligned; marching
-cubes places vertices at sub-voxel, interpolated positions, so the
-same Taubin smoothing pass actually rounds it off.
+This file is self-contained: it does not import from any other
+visualise_coordinates module, so it's safe to rename/replace with no
+dangling cross-file dependency.
 
-Because surface geometry now comes purely from the mask (Z / Z_theta),
-independent of the field's own values, field == 0 voxels are rendered
-correctly without any special-casing -- this is what previously made
-chi (0 = LV, the majority of the field) risky to threshold on directly.
-Field values are sampled onto the mesh vertices by trilinear
-interpolation of a NaN-inpainted copy of the field, and any vertex more
-than `nan_exclude_radius_vox` voxels from the nearest real value is
-re-masked to NaN (rendered in `nan_color`) so unrecorded regions read
-as gray rather than silently taking on a neighbour's value.
+chi, theta, and Z_theta are still accepted (and shape-checked if given)
+so call sites that already pass all four coordinate fields don't need
+to be edited -- chi/theta/Z_theta are simply ignored for rendering.
+
+Surface construction: marching cubes on a lightly Gaussian-blurred
+mask, then NaN-aware trilinear field sampling and Taubin smoothing --
+ported from plot_activation_maps.py.
+
+Saving / headless use
+----------------------
+Mirrors the screenshot_path / off_screen / interactive convention used
+by plot_activation_maps.py, so all of the pipeline's inspection figures
+behave the same way from run_simulation.py:
+
+    hp.coordinates.visualise_coordinates(
+        Z, phi=phi, psi=psi,
+        screenshot_path=f"{OUT}/{PATIENT_ID}_coordinates.png",
+        off_screen=True, interactive=False,
+    )
+
+- screenshot_path : if given, the rendered window is saved to this path.
+- off_screen      : if True, no window is opened at all (needed on a
+                     machine without a display, e.g. over SSH/CI) --
+                     rendering still happens, just into an off-screen
+                     buffer, so screenshot_path still works.
+- interactive      : if True (default), also pops up the window after
+                     any screenshot is taken, exactly as before. Set
+                     False for batch/headless runs so this doesn't block
+                     waiting for someone to close a window that isn't
+                     there.
 
 Public API
 ----------
@@ -49,6 +62,8 @@ Public API
 """
 
 from __future__ import annotations
+
+from pathlib import Path
 
 import numpy as np
 import pyvista as pv
@@ -71,10 +86,11 @@ def _mask_field_to_surface(
     field value are kept in the mesh (so they render, just uncoloured) --
     only voxels outside `mask` are dropped from the geometry.
 
-    Mirrors plot_activation_maps._mask_field_to_surface: a marching-cubes
-    isosurface of a lightly Gaussian-blurred mask, instead of a
-    cell-thresholded voxel-cube surface, so Taubin smoothing actually
-    rounds the surface off rather than just softening stair-steps.
+    Marching-cubes isosurface of a lightly Gaussian-blurred mask, instead
+    of a cell-thresholded voxel-cube surface, so Taubin smoothing actually
+    rounds the surface off rather than just softening stair-steps. See
+    plot_activation_maps.py, which this is ported from, for the full
+    rationale.
     """
     mask = mask.astype(bool)
 
@@ -97,10 +113,9 @@ def _mask_field_to_surface(
 
         # Inpaint NaNs with their nearest valid value first, so trilinear
         # interpolation of the field has nothing to bleed off of, then
-        # re-mask any vertex too far from real data back to NaN -- see
-        # plot_activation_maps._mask_field_to_surface for the full
-        # rationale (naive interpolation of the raw field would let NaNs
-        # wipe out far more of the surface than intended).
+        # re-mask any vertex too far from real data back to NaN (naive
+        # interpolation of the raw field would let NaNs wipe out far more
+        # of the surface than intended).
         nan_mask = np.isnan(field)
         if nan_mask.all():
             field_filled = None
@@ -145,31 +160,34 @@ def visualise_coordinates(
     nan_exclude_radius_vox: float = 1.5,
     voxel_size: float = 1.0,
     nan_color: str = "gray",
-    window_size: tuple[int, int] = (1600, 1200),
+    window_size: tuple[int, int] = (1600, 800),
     Z_theta: np.ndarray | None = None,
     background_color: str = "white",
     screenshot_path: str | Path | None = None,
     off_screen: bool = False,
     interactive: bool = True,
-):
+) -> pv.Plotter:
     """
-    Render phi / psi / chi / theta side by side in a single 2x2 PyVista
-    window, with a linked camera (rotate / zoom in one subplot, all four
-    follow).
+    Render phi / psi side by side in a single 1x2 PyVista window, with a
+    linked camera (rotate / zoom in one subplot, both follow). Surface
+    only -- no bounding box.
+
+    Signature-compatible with visualise_coordinates.visualise_coordinates
+    so it can be substituted in directly: chi, theta, and Z_theta are
+    accepted and shape-checked but not rendered.
 
     Parameters
     ----------
     Z : (Nx,Ny,Nz) ndarray, bool or {0,1}
-        The cut/subset mask to render phi/psi/chi on -- e.g. Z from
+        The cut/subset mask to render phi/psi on -- e.g. Z from
         run_step_1b_cut_mask(cfg, ...), loaded from cfg.CUT_MASK_PATH.
-        Must be the same shape as phi/psi/chi/theta.
-    phi, psi, chi, theta : (Nx,Ny,Nz) float arrays, NaN outside the
-        myocardium -- the four coordinate fields. Any left as None
+        Must be the same shape as phi/psi (and chi/theta, if given).
+    phi, psi : (Nx,Ny,Nz) float arrays, NaN outside the myocardium --
+        the two coordinate fields rendered here. Either left as None
         renders as a plain grey surface in that subplot.
-    Z_theta : (Nx,Ny,Nz) ndarray, bool or {0,1}, optional
-        Mask to render the theta (rotational) subplot on, instead of Z --
-        e.g. the full uncut myocardium mask S. Defaults to Z when omitted,
-        so existing calls are unaffected. Must match theta's shape.
+    chi, theta, Z_theta : accepted for drop-in compatibility with
+        visualise_coordinates.visualise_coordinates, shape-checked if
+        provided, but otherwise ignored -- not rendered in this window.
     smooth_surface_iter, smooth_pass_band : Taubin smoothing controls.
     mask_sigma : Gaussian blur sigma (voxels) applied to the mask before
         marching cubes -- higher gives a rounder but less exact surface.
@@ -181,39 +199,41 @@ def visualise_coordinates(
         the rendered mesh (index-space coordinates by default).
     nan_color : colour for mesh regions with no field value nearby.
     window_size : PyVista window size in pixels.
+    background_color : plotter background colour.
+    screenshot_path : if given, save the rendered figure here (any
+        format pv.Plotter.screenshot/.show(screenshot=...) supports,
+        e.g. .png). Works whether or not `interactive` is True. When
+        interactive (a window is shown), the screenshot is captured at
+        the moment the window closes, using whatever camera angle you
+        left it at -- rotate/zoom to the framing you want, then close
+        with the 'q' key. Closing via the OS title-bar/X button instead
+        destroys the render window before PyVista can grab it, and no
+        screenshot is saved.
+    off_screen : if True, render into an off-screen buffer instead of
+        opening a window -- use on machines without a display. Combine
+        with `screenshot_path` to save a figure headlessly, and leave
+        `interactive=False` in that case (there's no window to show).
+    interactive : if True (default), pop up the window after any
+        screenshot is captured. Set False for unattended/batch runs.
     """
     Z = Z.astype(bool)
-    Z_theta = Z if Z_theta is None else Z_theta.astype(bool)
-
-    # A shape-mismatched field no longer aborts the whole call -- it's
-    # dropped back to None (so its subplot renders as a plain/"not
-    # provided" surface instead of crashing) and a warning is printed.
-    # This matters most for theta, which can legitimately be computed on
-    # a different-shaped grid than Z when Z_theta isn't also supplied
-    # (or was itself mistakenly left at a mismatched default).
-    fields = {"phi": (phi, Z), "psi": (psi, Z), "chi": (chi, Z), "theta": (theta, Z_theta)}
-    for name, (field, mask) in fields.items():
-        if field is not None and field.shape != mask.shape:
-            print(
-                f"  [visualise_coordinates] WARNING: {name}.shape {field.shape} "
-                f"!= mask.shape {mask.shape} -- ignoring {name} for this render "
-                f"(its subplot will be blank)."
-            )
-            fields[name] = (None, mask)
-    phi, _ = fields["phi"]
-    psi, _ = fields["psi"]
-    chi, _ = fields["chi"]
-    theta, _ = fields["theta"]
+    # chi, theta, Z_theta are accepted for drop-in signature compatibility
+    # but are never rendered here, so their shapes are deliberately *not*
+    # checked against Z -- a caller can pass a chi/theta pair (and
+    # Z_theta) from an entirely different grid/resolution than Z/phi/psi
+    # without this function raising.
+    for name, field in (("phi", phi), ("psi", psi)):
+        if field is not None and field.shape != Z.shape:
+            raise ValueError(f"{name}.shape {field.shape} != mask.shape {Z.shape}")
 
     specs = [
-        ("phi",   phi,   Z,       "turbo",    (0.0, 1.0),        "Transmural  \u03c6  (0=endo, 1=epi)"),
-        ("psi",   psi,   Z,       "turbo",    (0.0, 1.0),        "Apicobasal  \u03c8  (0=apex, 1=base)"),
-        ("chi",   chi,   Z,       "coolwarm", (0.0, 1.0),        "Biventricular  \u03c7  (0=LV, 1=RV)"),
-        ("theta", theta, Z_theta, "gray",     (0.0, 2 * np.pi),  "Rotational  \u03b8  (0..2\u03c0, septum-anchored)"),
+        ("phi", phi, Z, "turbo", (0.0, 1.0), "Transmural  \u03c6  (0=endo, 1=epi)"),
+        ("psi", psi, Z, "turbo", (0.0, 1.0), "Apicobasal  \u03c8  (0=apex, 1=base)"),
     ]
-    positions = [(0, 0), (0, 1), (1, 0), (1, 1)]
+    positions = [(0, 0), (0, 1)]
 
-    plotter = pv.Plotter(shape=(2, 2), window_size=window_size)
+    plotter = pv.Plotter(shape=(1, 2), window_size=window_size, off_screen=off_screen)
+    plotter.set_background(background_color)
 
     for (row, col), (name, field, mask, cmap, clim, title) in zip(positions, specs):
         plotter.subplot(row, col)
@@ -234,7 +254,17 @@ def visualise_coordinates(
                               scalar_bar_args={"title": name})
             plotter.add_text(title, font_size=10)
         plotter.add_axes()
-        plotter.show_bounds(grid="back")
+        # Deliberately no plotter.show_bounds() -- surface only, no box.
 
     plotter.link_views()
-    plotter.show()
+    plotter.subplot(0, 0)
+    plotter.camera_position = "iso"
+
+    if screenshot_path:
+        Path(screenshot_path).parent.mkdir(parents=True, exist_ok=True)
+        plotter.show(screenshot=str(screenshot_path), auto_close=not interactive)
+        print(f"  Screenshot saved -> {screenshot_path}")
+    elif interactive:
+        plotter.show()
+
+    return plotter

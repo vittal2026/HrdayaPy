@@ -177,6 +177,49 @@ def _pick_av_node_interactively(
 # ---------------------------------------------------------------------------
 # Candidate "allowed Purkinje region" helpers
 # ---------------------------------------------------------------------------
+def _nearest_lookup_factory(volume_bool: np.ndarray):
+    """
+    Cheap drop-in replacement for
+        RegularGridInterpolator(axes, volume.astype(float), method='nearest',
+                                 bounds_error=False, fill_value=0)
+    for this module's specific use pattern: F(points) > 0.5 checks against
+    a 0/1-valued volume, at integer-spaced grid axes (np.arange(shape[i])).
+
+    RegularGridInterpolator's construction copies the WHOLE volume into
+    itself as float64 and sets up generic N-D interpolation machinery it
+    doesn't need here -- for a plain grid of integer axes, 'nearest'
+    interpolation is exactly "round each coordinate to the nearest
+    integer, then index", and out-of-[0, shape-1]-bounds points are
+    exactly fill_value=0. This reproduces that behaviour with no data
+    copy at construction and a single fancy-index per call instead of
+    scipy's general interpolation codepath -- functionally identical
+    output, much cheaper to build and to call.
+    """
+    shape  = volume_bool.shape
+    vol_u8 = np.ascontiguousarray(volume_bool, dtype=np.uint8)
+
+    def _F(points: np.ndarray) -> np.ndarray:
+        points = np.asarray(points, dtype=np.float64)
+        # Bounds are checked against the CONTINUOUS coordinate range
+        # [0, shape[d]-1], before rounding -- matching
+        # RegularGridInterpolator's behaviour exactly. A point like 19.08
+        # on a 20-point axis (valid indices 0..19) is outside the
+        # continuous domain [0, 19] and gets fill_value=0, even though
+        # rounding it would land on the valid index 19 -- checking
+        # bounds on the rounded index instead (as an earlier version of
+        # this function did) is NOT equivalent and was caught by a fuzz
+        # test against RegularGridInterpolator before this was fixed.
+        in_bounds = np.ones(len(points), dtype=bool)
+        for d in range(3):
+            in_bounds &= (points[:, d] >= 0) & (points[:, d] <= shape[d] - 1)
+        out = np.zeros(len(points), dtype=np.float64)
+        idx = np.rint(points[in_bounds]).astype(np.int64)
+        out[in_bounds] = vol_u8[idx[:, 0], idx[:, 1], idx[:, 2]]
+        return out
+
+    return _F
+
+
 # Shared by create_purkinje()'s own Step 1/2 (Purkinje layer / candidate
 # terminal positions Si) and by pick_av_node_and_biventricular_roots()
 # below, so both use exactly the same definition of "endocardial and
@@ -209,6 +252,14 @@ def _near_surface_mask(
     growth to disproportionately fill the septum. Pass the whole,
     unsplit myocardium mask as surface_reference_mask to measure against
     the real boundary instead and avoid that bias.
+
+    This is the single most expensive step in candidate-region setup at
+    fine voxel resolutions (distance_transform_edt is O(N) over the WHOLE
+    reference array, not just the myocardium). Compute it once per
+    create_purkinje() call and pass the result via
+    precomputed_near_surface to _candidate_terminal_mask /
+    _candidate_terminal_points below, rather than letting each call
+    recompute it independently.
     """
     if surface_depth_vox is None:
         return None
@@ -225,10 +276,21 @@ def _candidate_terminal_mask(
     max_height: float,
     surface_depth_vox: Optional[float] = None,
     surface_reference_mask: Optional[np.ndarray] = None,
+    precomputed_near_surface: Optional[np.ndarray] = None,
 ) -> np.ndarray:
-    """Boolean mask of voxels allowed to host a Purkinje terminal/root."""
+    """Boolean mask of voxels allowed to host a Purkinje terminal/root.
+
+    Pass precomputed_near_surface (from an earlier _near_surface_mask
+    call with the same surface_depth_vox/surface_reference_mask) to skip
+    recomputing the expensive distance transform here. When None
+    (default -- unchanged behaviour for other callers), it's computed
+    fresh from surface_depth_vox/surface_reference_mask as before.
+    """
     valid_mask = voxel_mat.astype(bool) & (transmural < depth) & (apicobasal < max_height)
-    near_surface = _near_surface_mask(voxel_mat, surface_depth_vox, surface_reference_mask)
+    near_surface = (
+        precomputed_near_surface if precomputed_near_surface is not None
+        else _near_surface_mask(voxel_mat, surface_depth_vox, surface_reference_mask)
+    )
     if near_surface is not None:
         valid_mask = valid_mask & near_surface
     return valid_mask
@@ -242,15 +304,18 @@ def _candidate_terminal_points(
     max_height: float,
     surface_depth_vox: Optional[float] = None,
     surface_reference_mask: Optional[np.ndarray] = None,
+    precomputed_near_surface: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """
     (N,3) array of candidate voxel positions in (x,y,z) "root convention"
     -- i.e. the same column order as the S array built in create_purkinje's
     own Step 2, and the same order _pick_av_node_interactively returns.
+
+    See _candidate_terminal_mask for precomputed_near_surface.
     """
     valid_mask = _candidate_terminal_mask(
         voxel_mat, transmural, apicobasal, depth, max_height,
-        surface_depth_vox, surface_reference_mask,
+        surface_depth_vox, surface_reference_mask, precomputed_near_surface,
     )
     lin_ind     = np.where(valid_mask.ravel())[0]
     coords_flat = np.unravel_index(lin_ind, voxel_mat.shape)
@@ -402,7 +467,7 @@ def create_purkinje(
     transmural: np.ndarray,
     apicobasal: np.ndarray,
     # ---- original parameters (defaults unchanged) ----
-    n_term: int = 650,
+    n_term: int = 750,
     n_con_max: int = 20,
     theta_max: float = 63.0,
     cond_vel: float = 340.0,
@@ -640,6 +705,12 @@ def create_purkinje(
 
     pkn_layer = (transmural < depth) & voxel_mat
 
+    # Computed once here and reused in Step 2 below via
+    # precomputed_near_surface -- this distance_transform_edt is the most
+    # expensive single operation in setup at fine voxel resolutions
+    # (O(N) over the whole reference array), and Step 1/2 previously
+    # recomputed it twice with identical inputs.
+    near_surface = None
     if surface_depth_vox is not None:
         if verbose:
             ref_desc = "true myocardium (surface_reference_mask)" if surface_reference_mask is not None else "mask"
@@ -655,16 +726,11 @@ def create_purkinje(
         print(f"   Endocardial voxels   : {int(np.sum((transmural == 0) & voxel_mat))}")
         print(f"   Purkinje region voxels: {int(np.sum(pkn_layer_diff))}")
 
-    # Nearest-neighbour interpolator for fast in-region checks
-    F = RegularGridInterpolator(
-        (np.arange(pkn_layer_diff.shape[0]),
-         np.arange(pkn_layer_diff.shape[1]),
-         np.arange(pkn_layer_diff.shape[2])),
-        pkn_layer_diff.astype(float),
-        method='nearest',
-        bounds_error=False,
-        fill_value=0,
-    )
+    # Nearest-neighbour lookup for fast in-region checks. See
+    # _nearest_lookup_factory's docstring -- functionally identical to
+    # RegularGridInterpolator(method='nearest', bounds_error=False,
+    # fill_value=0) for this 0/1 grid, without its full-volume data copy.
+    F = _nearest_lookup_factory(pkn_layer_diff)
 
     # ------------------------------------------------------------------ #
     # Step 2 — Identify candidate intermediate terminal positions (Si)    #
@@ -675,6 +741,7 @@ def create_purkinje(
     S = _candidate_terminal_points(
         voxel_mat, transmural, apicobasal, depth, max_height,
         surface_depth_vox, surface_reference_mask,
+        precomputed_near_surface=near_surface,
     )
     n_pts = len(S)
 

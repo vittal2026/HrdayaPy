@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """
 run_experiment4.py
 ===================================================================
@@ -42,6 +43,17 @@ that actually had a transition -- typically far fewer than a single
 uniform fine grid over the whole range would need, and concentrated
 where the answer is actually uncertain.
 
+ANISOTROPIC PORT
+-----------------------------------
+experiment_common.run_directional() and base_values.py were already ported
+to the anisotropic solver (sigma_l/sigma_t + a per-voxel fibre field
+uniform along Z, taken from niederer_values.py -- see those modules'
+docstrings). This script's only anisotropy-related change is in run_cell():
+it now passes sigma_l=ec.SIGMA_L, sigma_t=ec.SIGMA_T instead of the retired
+sigma_M=ec.SIGMA_M. Per the manuscript's Section 2.11.4 scope, Experiment 4
+still sweeps only c_pmj and n_pmj -- (sigma_l, sigma_t) are fixed at
+base_values.py's defaults, not swept here.
+
 Run with:  python3 run_experiment4.py
 Optional:  --dt 0.05 --dx_p 0.3152 --dx_m 0.3152 --T_base 180
            --c_pmj_scales_coarse 0.01 0.1 1 10 100 --n_fine 4
@@ -60,10 +72,15 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-# experiment_common.py / base_values.py now live one level up, in
-# experiments_pyonly/, shared by Experiments 2/3/4 -- see that module's
-# docstring.
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+# experiment_common.py / base_values.py now live ALONGSIDE this script
+# (both directly in this same directory), not one level up as before.
+# Python already puts the running script's own directory on sys.path
+# automatically (as sys.path[0]) when invoked as `python3
+# run_experiment4.py`, so this insert is technically redundant for that
+# invocation style -- it's kept explicit anyway as a safety net for
+# other invocation methods (e.g. `python3 -m`, or a test runner) that
+# don't guarantee that behaviour.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 import experiment_common as ec
 
 OUT_DIR = Path(__file__).resolve().parent / "outputs"
@@ -72,7 +89,7 @@ OUT_DIR.mkdir(parents=True, exist_ok=True)
 # =============================================================================
 # Sweep defaults
 # =============================================================================
-C_PMJ_SCALES_COARSE = [0.001, 0.01, 0.10, 1.0]   # 3 decades, 4 points
+C_PMJ_SCALES_COARSE = [0.0001, 0.001, 0.01, 0.1, 1.0]
 N_PMJ_VALUES = [1, 2, 4]
 DIRECTIONS = ["orthodromic", "antidromic"]
 N_FINE_POINTS = 4   # additional log-spaced points per detected bracket
@@ -89,7 +106,7 @@ def run_cell(direction: str, n_pmj: int, scale: float, phase: str,
     print(f"\n--- [{phase}] {direction}  n_pmj={n_pmj}  c_pmj scale={scale:g} "
           f"(c_pmj={c_pmj:.4g} mS) ---")
     out = ec.run_directional(
-        sigma_M=ec.SIGMA_M, sigma_P=ec.SIGMA_P,
+        sigma_l=ec.SIGMA_L, sigma_t=ec.SIGMA_T, sigma_P=ec.SIGMA_P,
         dt=dt, dx_p=dx_p, dx_m=dx_m, T=T, tag=tag,
         c_pmj=c_pmj, n_pmj=n_pmj, direction=direction,
         out_dir=OUT_DIR,
@@ -100,6 +117,12 @@ def run_cell(direction: str, n_pmj: int, scale: float, phase: str,
     print(f"    junction_capture_fraction = {out['pmj_junction_capture_fraction']:.3f}   "
           f"propagating_capture = {out['pmj_propagating_capture']}   "
           f"n_myo_activated = {out['pmj_n_myo_activated']}   delay = {delay_str}")
+
+    # Observed Purkinje conduction velocity for this run, via the same
+    # restricted-region fit Experiment 3 uses (ec.estimate_purkinje_cv).
+    cv_p = ec.estimate_purkinje_cv(out["p_arc_length"], out["p_act"])
+    print(f"    Purkinje CV = {cv_p['cv_mm_per_ms']:.2f} mm/ms "
+          f"(n={cv_p['n_points']}, R^2={cv_p['r2']:.4f})")
     return dict(direction=direction, n_pmj=n_pmj, phase=phase,
                 c_pmj_scale=scale, c_pmj=c_pmj,
                 junction_capture_fraction=out["pmj_junction_capture_fraction"],

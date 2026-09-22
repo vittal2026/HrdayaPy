@@ -138,3 +138,74 @@ def load_stim_region_from_point(path):
     whichever compute_* it paired with.
     """
     return load_stim_region(path)
+
+
+def compute_stim_regions_from_points(
+    S,
+    names,
+    save_dir,
+    *,
+    radius_mm: float = 5.0,
+    voxel_size: float = 0.4,
+    mesh_step: int = 2,
+):
+    """
+    Multi-site counterpart of compute_stim_region_from_point: opens one
+    PyVista picker window per name in `names`, in order, and returns all
+    of the resulting masks together. Use this for protocols that need
+    several independent myocardial stimulus sites (e.g. an S1 site and
+    an S2 site), instead of calling compute_stim_region_from_point once
+    per site by hand.
+
+    Each site is saved separately as <save_dir>/<name>_stim_region.npy
+    (same crash-safe temp-file pattern as compute_stim_region_from_point),
+    so a later stage can reload any subset of them without re-picking.
+
+    Parameters
+    ----------
+    S           : (Nx,Ny,Nz) bool -- myocardium mask, from compute_geometry
+    names       : sequence of str -- one identifier per site, e.g.
+                  ["apex", "rv_bw"]. Picked in this order. Also used as
+                  the "region" key in a stim_protocol entry with
+                  target="region" downstream.
+    save_dir    : directory the per-site .npy files are written into
+    radius_mm, voxel_size, mesh_step : as in compute_stim_region_from_point;
+                  same value used for every site in this call. Pick one
+                  site individually with compute_stim_region_from_point
+                  instead if it needs a different radius.
+
+    Returns
+    -------
+    regions : dict[str, (Nx,Ny,Nz) bool] -- one mask per name, in the
+              order given
+    """
+    save_dir = Path(save_dir)
+    regions = {}
+    for i, name in enumerate(names, start=1):
+        print(f"--- Pick site {i}/{len(names)}: {name!r} ---")
+        regions[name] = compute_stim_region_from_point(
+            S, save_path=save_dir / f"{name}_stim_region.npy",
+            radius_mm=radius_mm, voxel_size=voxel_size, mesh_step=mesh_step,
+        )
+    return regions
+
+
+def load_stim_regions(names, save_dir):
+    """
+    Load several previously saved stim_regions_from_points sites. No
+    recomputation/re-picking. Raises the same FileNotFoundError as
+    load_stim_region if a name's file is missing.
+
+    Parameters
+    ----------
+    names    : sequence of str -- same names passed to
+               compute_stim_regions_from_points
+    save_dir : directory they were saved into
+
+    Returns
+    -------
+    regions : dict[str, (Nx,Ny,Nz) bool] -- one mask per name
+    """
+    save_dir = Path(save_dir)
+    return {name: load_stim_region(save_dir / f"{name}_stim_region.npy")
+            for name in names}

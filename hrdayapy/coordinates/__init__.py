@@ -34,6 +34,7 @@ from .rotational import compute_theta, load_theta
 from .stimulus_region import (
     compute_stim_region, load_stim_region,
     compute_stim_region_from_point, load_stim_region_from_point,
+    compute_stim_regions_from_points, load_stim_regions,
 )
 from .roi_query import compute_roi, load_roi
 
@@ -51,6 +52,7 @@ __all__ = [
     "compute_theta", "load_theta",
     "compute_stim_region", "load_stim_region",
     "compute_stim_region_from_point", "load_stim_region_from_point",
+    "compute_stim_regions_from_points", "load_stim_regions",
     "compute_roi", "load_roi",
     "visualise_coordinates", "plot_stimulus_region",
 ]

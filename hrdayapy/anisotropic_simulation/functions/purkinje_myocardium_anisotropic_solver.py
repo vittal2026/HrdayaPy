@@ -1210,6 +1210,7 @@ def _resolve_stim_sites(
     N_myo:         int,
     dev:           torch.device,
     dtype:         torch.dtype,
+    stim_regions:  dict[str, np.ndarray] | None = None,   # name -> (Nx,Ny,Nz) bool
 ) -> list[dict]:
     """
     Turn each `stim_protocol` entry into a ready-to-use stimulus site:
@@ -1228,6 +1229,15 @@ def _resolve_stim_sites(
     else:
         ectopic_node_ids = np.array([], dtype=np.int64)
 
+    # Named regions: any number of independent voxel masks, selected per
+    # protocol entry with  target="region", region="<name>".  Same mapping
+    # as the single "ectopic" mask above (voxel mask -> myocardial nodes ->
+    # global solver ids Np + i), just once per name.
+    region_node_ids: dict[str, np.ndarray] = {}
+    for _name, _mask in (stim_regions or {}).items():
+        _in = np.asarray(_mask)[vox_idx[:, 0], vox_idx[:, 1], vox_idx[:, 2]].astype(bool)
+        region_node_ids[_name] = Np + np.where(_in)[0]
+
     sites = []
     for ev in stim_protocol:
         target = ev.get("target", "root")
@@ -1240,12 +1250,23 @@ def _resolve_stim_sites(
                       f"'ectopic' but no myocardial nodes fall inside "
                       f"ectopic_region (pass a non-empty mask, e.g. "
                       f"cfg.PATH_STIM_REGION, or widen STIM_*_TOL in config.py).")
+        elif target == "region":
+            rname = ev.get("region")
+            if rname not in region_node_ids:
+                raise ValueError(
+                    f"Stimulus '{ev.get('name', target)}' has target='region' "
+                    f"with region={rname!r}, but stim_regions only defines "
+                    f"{sorted(region_node_ids)}.")
+            node_ids = region_node_ids[rname]
+            if node_ids.size == 0:
+                print(f"  WARNING: stimulus '{ev.get('name', target)}' targets "
+                      f"region {rname!r} but no myocardial nodes fall inside it.")
         elif target == "custom":
             node_ids = np.asarray(ev["node_ids"], dtype=np.int64)
         else:
             raise ValueError(
                 f"Unknown stimulus target '{target}' (expected "
-                f"'root', 'ectopic', or 'custom').")
+                f"'root', 'ectopic', 'region', or 'custom').")
 
         amp_tensor = torch.zeros(N_global, dtype=dtype, device=dev)
         if node_ids.size:
@@ -1311,6 +1332,7 @@ def purkinje_myocardium_anisotropic_solver(
     theta:        float = 0.5,
     stim_protocol: list[dict] | None = None,
     ectopic_region: np.ndarray | None = None,
+    stim_regions: dict[str, np.ndarray] | None = None,
     stim_len_mm:  float = 2.0,
     c_pmj:        float = 0.05,
     n_pmj:        int   = 1,
@@ -1382,6 +1404,12 @@ def purkinje_myocardium_anisotropic_solver(
                 None -> a single one-shot AV-node pulse at t=0.
     ectopic_region : boolean voxel mask (Nx,Ny,Nz), required only if
                 `stim_protocol` includes a "target": "ectopic" entry.
+    stim_regions : dict name -> boolean voxel mask (Nx,Ny,Nz). Lets a protocol
+                use several independent myocardial sites, e.g.
+                    stim_regions  = {"apex": m1, "rv_free_wall": m2}
+                    stim_protocol = [dict(target="region", region="apex", ...),
+                                     dict(target="region", region="rv_free_wall", ...)]
+                Coexists with `ectopic_region` (which is unchanged).
     stim_len_mm : radius [mm] of the "root" stimulus zone around the
                 earliest-activated Purkinje node.
     sigma_P   : Purkinje axial conductivity [mS/mm]
@@ -1573,7 +1601,7 @@ def purkinje_myocardium_anisotropic_solver(
         ]
     stim_sites  = _resolve_stim_sites(
         stim_protocol, stim_mask_np, ectopic_region, vox,
-        Np, N_myo, dev, dtype,
+        Np, N_myo, dev, dtype, stim_regions=stim_regions,
     )
     I_stim_buf = torch.zeros(N_global, dtype=dtype, device=dev)   # reused every step
 

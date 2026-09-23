@@ -833,7 +833,7 @@ def voxelize_face_labels(S, verts, faces, face_masks: dict, return_nearest_face=
 def label_ventricle_mesh(S: np.ndarray, mesh_step: int = 2, apex_cap_frac: float = 0.01,
                            base_cap_frac: float = 0.01, psi=None,
                            basal_psi_threshold: float = 0.97,
-                           voxel_size: float = 0.4, target_mm: float | None = 1.0,
+                           voxel_size: float = 0.4, target_mm: float | None = None,
                            verbose: bool = True):
     """
     Full robust labelling pipeline for a single fused-myocardium binary
@@ -842,6 +842,21 @@ def label_ventricle_mesh(S: np.ndarray, mesh_step: int = 2, apex_cap_frac: float
 
     Parameters
     ----------
+    mesh_step : int
+        Marching-cubes step size, in voxels. Only takes effect when
+        target_mm=None (the default here).
+    voxel_size, target_mm : target_mm overrides mesh_step with a
+        physical-mm step size (see mm_step_size). Defaults to None here
+        -- unlike the interactive pickers elsewhere in this package,
+        where target_mm defaults to 1.0 -- because relabel_lv_rv_with_psi
+        (below) re-extracts this exact mesh later to line up against the
+        surface_label this call produces, and the two calls' *effective*
+        mesh_step (whether literal or mm-derived) must match exactly for
+        that to work. Leaving target_mm=None by default means mesh_step
+        alone still fully controls this, as before target_mm existed --
+        set target_mm explicitly (the same value, and the same
+        voxel_size, on both this call and the later relabel_lv_rv_with_psi
+        call) only if you want that.
     psi : (Nx,Ny,Nz) float, optional
         Apicobasal coordinate field (0 = apex, 1 = base). When given, the
         LV/RV endocardial split uses the psi-based basal cut and the
@@ -984,7 +999,7 @@ def label_ventricle_mesh(S: np.ndarray, mesh_step: int = 2, apex_cap_frac: float
 def relabel_lv_rv_with_psi(S: np.ndarray, psi: np.ndarray, surface_label: np.ndarray,
                              mesh_step: int = 2, apex_cap_frac: float = 0.01,
                              base_cap_frac: float = 0.01, basal_psi_threshold: float = 0.97,
-                             voxel_size: float = 0.4, target_mm: float | None = 1.0,
+                             voxel_size: float = 0.4, target_mm: float | None = None,
                              long_axis_hint=None, verbose: bool = True):
     """
     Redo just the LV/RV endocardial split with the psi-based basal cut
@@ -1014,7 +1029,17 @@ def relabel_lv_rv_with_psi(S: np.ndarray, psi: np.ndarray, surface_label: np.nda
     mesh_step     : marching-cubes step size -- MUST match whatever
                     label_ventricle_mesh(S, mesh_step=...) used to
                     produce `surface_label`, so the re-extracted mesh
-                    lines up with it.
+                    lines up with it. Only takes effect when
+                    target_mm=None (the default here).
+    voxel_size, target_mm : target_mm overrides mesh_step with a
+                    physical-mm step size (see mm_step_size). Defaults
+                    to None -- same reasoning as mesh_step just above:
+                    the two calls must produce the *same* mesh, and
+                    target_mm being active by default (as it is for this
+                    package's interactive pickers) would silently break
+                    that unless voxel_size/target_mm also happened to
+                    match between the two calls. Set it explicitly on
+                    both calls, with the same values, if you want it.
     basal_psi_threshold : faces with sampled psi >= this are "basal" for
                     the cut (default 0.97, matching test_psi_basal_cut.py).
     long_axis_hint : (3,) array, optional -- e.g. the previous run's
@@ -1058,10 +1083,10 @@ def relabel_lv_rv_with_psi(S: np.ndarray, psi: np.ndarray, surface_label: np.nda
             f"surface_label has {len(surface_label):,} entries -- they "
             f"don't match, so this mesh isn't the one surface_label was "
             f"computed for. Likely cause: this call's effective mesh_step "
-            f"({mesh_step}) differs from label_ventricle_mesh's. If you're "
-            f"using target_mm (the default), pass the same voxel_size to "
-            f"both calls; otherwise pass the same mesh_step to both with "
-            f"target_mm=None.")
+            f"({mesh_step}) differs from label_ventricle_mesh's. If either "
+            f"call passes target_mm (not the default here), pass the same "
+            f"voxel_size and target_mm to both; otherwise make sure both "
+            f"calls use the same literal mesh_step.")
     centroids, normals, areas = face_geometry(verts, faces)
     log(f"{verts.shape[0]:,} vertices, {faces.shape[0]:,} faces")
 

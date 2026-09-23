@@ -1,4 +1,4 @@
-]import numpy as np
+import numpy as np
 import pyvista as pv
 from scipy.ndimage import label
 

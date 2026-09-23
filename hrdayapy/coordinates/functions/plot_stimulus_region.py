@@ -1,4 +1,4 @@
-"""
+]"""
 plot_stimulus_region.py
 ========================
 Highlights a stimulus region (e.g. from select_coordinate_region) on
@@ -19,26 +19,7 @@ from __future__ import annotations
 import numpy as np
 import pyvista as pv
 
-
-def _mask_to_mesh(mask: np.ndarray, smooth_iter: int = 50,
-                   pass_band: float = 0.1) -> pv.PolyData:
-    grid = pv.ImageData()
-    grid.dimensions = np.array(mask.shape) + 1
-    grid.spacing = (1, 1, 1)
-    grid.origin = (0, 0, 0)
-    grid.cell_data["valid"] = mask.astype(bool).flatten(order="F").astype(np.float32)
-
-    mesh = grid.threshold(0.5, scalars="valid")
-    if mesh.n_cells == 0:
-        return mesh
-    mesh = mesh.extract_surface().triangulate()
-    if smooth_iter > 0 and mesh.n_points > 0:
-        mesh = mesh.smooth_taubin(
-            n_iter=smooth_iter, pass_band=pass_band,
-            boundary_smoothing=True, feature_smoothing=False,
-            normalize_coordinates=True,
-        )
-    return mesh
+from .mesh_viz_utils import mask_to_pv_surface
 
 
 def plot_stimulus_region(
@@ -49,6 +30,8 @@ def plot_stimulus_region(
     region_color: str = "red",
     smooth_surface_iter: int = 50,
     smooth_pass_band: float = 0.1,
+    voxel_size: float = 0.4,
+    target_mm: float = 1.0,
 ):
     """
     Plot the surface of `mask` as a uniform translucent grey shell, with
@@ -73,14 +56,23 @@ def plot_stimulus_region(
         never competing with an anatomical field for attention.
     region_color : colour for the highlighted region (rendered opaque).
     smooth_surface_iter, smooth_pass_band : Taubin smoothing controls.
+    voxel_size, target_mm : passed to mesh_viz_utils.mask_to_pv_surface --
+        target_mm (mm per marching-cubes step, default 1.0) keeps this
+        plot's surface reconstruction cost roughly constant regardless of
+        how fine voxel_size is, instead of it getting denser -- and
+        slower to build and smooth -- purely because mask was built at a
+        finer resolution. See mask_to_pv_surface's docstring for why this
+        replaced the old per-voxel-cell ImageData()+threshold() approach.
     """
     mask = mask.astype(bool)
     region = region.astype(bool) & mask
 
-    base_mesh = _mask_to_mesh(mask, smooth_iter=smooth_surface_iter,
-                               pass_band=smooth_pass_band)
-    region_mesh = _mask_to_mesh(region, smooth_iter=smooth_surface_iter,
-                                 pass_band=smooth_pass_band)
+    base_mesh = mask_to_pv_surface(mask, voxel_size=voxel_size, target_mm=target_mm,
+                                    smooth_iter=smooth_surface_iter,
+                                    pass_band=smooth_pass_band)
+    region_mesh = mask_to_pv_surface(region, voxel_size=voxel_size, target_mm=target_mm,
+                                      smooth_iter=smooth_surface_iter,
+                                      pass_band=smooth_pass_band)
 
     n_region_vox = int(region.sum())
     print(f"  [stimulus region] {n_region_vox:,} voxels on the surface of mask")

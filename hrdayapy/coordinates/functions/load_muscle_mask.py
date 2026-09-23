@@ -4,6 +4,7 @@ import pyvista as pv
 from scipy.ndimage import zoom
 
 from ._nrrd_spacing import resolve_original_spacing
+from .mesh_viz_utils import mask_to_pv_surface
 
 
 def load_muscle_mask(
@@ -14,6 +15,8 @@ def load_muscle_mask(
     pad_width=0,
     plot=False,
     threshold=0,
+    plot_voxel_size: float = 0.4,
+    plot_target_mm: float = 1.0,
 ):
     """
     Load a segmentation NRRD and return a binary myocardium mask, correctly
@@ -156,18 +159,16 @@ def load_muscle_mask(
     # Optional visualization
     # -----------------------------
     if plot:
-        grid = pv.ImageData()
-        grid.dimensions = np.array(S.shape) + 1
-        grid.spacing = (1, 1, 1)
-        grid.origin = (0, 0, 0)
-
-        grid.cell_data["mask"] = S.flatten(order="F")
-
-        surface = (
-            grid.threshold(0.5, scalars="mask")
-                .extract_surface()
-                .smooth(n_iter=30, relaxation_factor=0.1)
-        )
+        # Taubin-smoothed; replaces the old per-voxel-cell
+        # ImageData()+threshold()+Laplacian .smooth() (see
+        # mesh_viz_utils.mask_to_pv_surface docstring). plot_voxel_size is
+        # an approximate value for sizing this debug plot's mesh density
+        # only -- it isn't traced through target_spacing/original_spacing's
+        # resampling logic above, so it won't exactly match S's true
+        # physical voxel size if you resampled; that's fine here since
+        # only the mesh's visual density depends on it, not correctness.
+        surface = mask_to_pv_surface(S, voxel_size=plot_voxel_size, target_mm=plot_target_mm,
+                                      smooth_iter=30, pass_band=0.1)
 
         plotter = pv.Plotter()
         plotter.add_mesh(

@@ -2,11 +2,15 @@ import numpy as np
 import pyvista as pv
 from scipy import ndimage as ndi
 
+from .mesh_viz_utils import mask_to_pv_surface
+
 
 def compute_basal_plane(
     S,
     axis,
-    plot=False
+    plot=False,
+    voxel_size: float = 0.4,
+    target_mm: float = 1.0,
 ):
     """
     Compute the basal plane index along the apico-basal axis.
@@ -17,6 +21,11 @@ def compute_basal_plane(
         Binary myocardium mask.
     axis : int
         Apico-basal axis index (0, 1, or 2).
+    voxel_size, target_mm : only used when plot=True -- passed to
+        mesh_viz_utils.mask_to_pv_surface for the sanity-check surface.
+        target_mm (default 1.0 mm) keeps that surface's reconstruction
+        cost roughly constant regardless of voxel_size, instead of it
+        silently getting denser (and slower) at a finer mesh.
     plot : bool, optional
         If True, visualize the basal plane location.
 
@@ -128,18 +137,11 @@ def compute_basal_plane(
             j_size=max(S.shape)
         )
 
-        # Surface
-        grid = pv.ImageData()
-        grid.dimensions = np.array(S.shape) + 1
-        grid.spacing = (1, 1, 1)
-        grid.origin = (0, 0, 0)
-        grid.cell_data["mask"] = S.astype(np.uint8).flatten(order="F")
-
-        surface = (
-            grid.threshold(0.5, scalars="mask")
-                .extract_surface()
-                .smooth(n_iter=20, relaxation_factor=0.1)
-        )
+        # Surface (Taubin-smoothed; replaces the old per-voxel-cell
+        # ImageData()+threshold()+Laplacian .smooth() -- see
+        # mesh_viz_utils.mask_to_pv_surface docstring)
+        surface = mask_to_pv_surface(S, voxel_size=voxel_size, target_mm=target_mm,
+                                      smooth_iter=20, pass_band=0.1)
 
         plotter = pv.Plotter()
         plotter.add_mesh(surface, color="lightgray", opacity=0.3)

@@ -37,6 +37,36 @@ things matter here that don't matter at coordinate-field scale:
    computation on interior voxels, since the pad exceeds every stencil
    width used.
 
+PATCH NOTES (2026-09-23)
+-------------------------
+Two changes, both purely internal -- the public API and the values of
+every voxel in/near S are unchanged:
+
+* `_fill_nan_nearest` now only extrapolates into a thin halo around S
+  (default 2 voxels -- one more than np.gradient's 1-voxel stencil, for
+  safety margin), instead of every background voxel in the crop. The old
+  version built a nearest-neighbour index array sized to the *entire*
+  background of the cropped box -- for a mask whose bounding box fills
+  most of the volume, that's close to a billion entries, which is what
+  triggered the `ArrayMemoryError` this patch fixes. Voxels beyond the
+  halo now come back as 0 instead of an arbitrary extrapolated value,
+  which is *closer* to this module's documented contract ("0 outside S")
+  than the old behaviour was, and those voxels were never read by
+  anything downstream of this function anyway (np.gradient only touches
+  1-voxel neighbours; the sanity-check phi-bands are restricted to
+  `interior`, itself inside S).
+* The verbose-only sanity-check step no longer recomputes
+  `_fill_nan_nearest(phi_c, S_c)` a second time. It reuses the
+  `phi_filled` array already computed earlier in `generate_fibre_direction`
+  for the alpha-angle law. This was the exact call that crashed: it ran
+  at the point of peak memory, after fx/fy/fz and every intermediate
+  frame array were already resident, purely to reproduce a value already
+  sitting in memory a few lines earlier.
+
+Together these make the previously-crashing call succeed even without
+setting verbose=False, and shrink the fill step's peak temporary array
+by roughly two orders of magnitude for masks with a large bounding box.
+
 Public API
 ----------
     f = generate_fibre_direction(S, phi, psi, spacing_mm, ...)
@@ -49,7 +79,7 @@ import math
 from pathlib import Path
 
 import numpy as np
-from scipy.ndimage import distance_transform_edt, binary_erosion
+from scipy.ndimage import distance_transform_edt, binary_erosion, binary_dilation
 
 
 EPS = np.float32(1e-8)
@@ -60,14 +90,25 @@ DTYPE = np.float32
 # Internal helpers -- explicitly float32, free temporaries promptly
 # =============================================================================
 
-def _fill_nan_nearest(field: np.ndarray, S: np.ndarray) -> np.ndarray:
-    """Extrapolate the nearest in-mask value into the NaN region outside S,
-    so np.gradient doesn't get NaN-contaminated right at the wall boundary."""
+def _fill_nan_nearest(field: np.ndarray, S: np.ndarray, halo: int = 2) -> np.ndarray:
+    """Extrapolate the nearest in-mask value into a thin halo around S, so
+    np.gradient doesn't get NaN-contaminated right at the wall boundary.
+
+    Only voxels within `halo` steps of S are filled -- np.gradient's stencil
+    only ever reads 1 voxel out, so `halo` >= 2 is a safe margin without
+    the whole invalid-index array in `_fill_nan_nearest` costing memory
+    proportional to the entire background of the crop. Voxels further than
+    `halo` from S are returned as 0.
+    """
     filled = field.copy()
     invalid = ~S
-    idx = distance_transform_edt(invalid, return_distances=False, return_indices=True)
-    filled[invalid] = field[tuple(idx[:, invalid])]
-    del idx, invalid
+    need_fill = binary_dilation(S, iterations=halo) & invalid
+    if need_fill.any():
+        idx = distance_transform_edt(invalid, return_distances=False, return_indices=True)
+        filled[need_fill] = field[tuple(idx[:, need_fill])]
+        del idx
+    filled[invalid & ~need_fill] = 0.0
+    del invalid, need_fill
     return np.nan_to_num(filled, nan=0.0).astype(DTYPE, copy=False)
 
 
@@ -187,7 +228,6 @@ def generate_fibre_direction(
     phi_filled = _fill_nan_nearest(phi_c, S_c)
     a_endo, a_epi = math.radians(alpha_endo_deg), math.radians(alpha_epi_deg)
     alpha = (a_endo + (a_epi - a_endo) * phi_filled).astype(DTYPE, copy=False)
-    del phi_filled
 
     cos_a = np.cos(alpha).astype(DTYPE, copy=False)
     sin_a = np.sin(alpha).astype(DTYPE, copy=False)
@@ -212,12 +252,17 @@ def generate_fibre_direction(
     del _norm
 
     if verbose:
+        # Reuses the phi_filled computed above for the alpha law, instead of
+        # recomputing it here -- the recompute was the call that used to
+        # crash, since it ran at peak memory with every frame array above
+        # still alive. Passing the same array through costs nothing extra.
         _print_sanity_checks(
             S_c, fx, fy, fz, et_x, et_y, et_z, et_norm,
             elx, ely, elz, el_norm, ecx, ecy, ecz, ec_norm,
-            phi_c, alpha_endo_deg, alpha_epi_deg,
+            phi_filled, alpha_endo_deg, alpha_epi_deg,
         )
 
+    del phi_filled
     del elx, ely, elz, ecx, ecy, ecz, et_x, et_y, et_z, et_norm, el_norm, ec_norm
     gc.collect()
 
@@ -239,11 +284,16 @@ def generate_fibre_direction(
 def _print_sanity_checks(
     S_c, fx, fy, fz, et_x, et_y, et_z, et_norm,
     elx, ely, elz, el_norm, ecx, ecy, ecz, ec_norm,
-    phi_c, alpha_endo_deg, alpha_epi_deg,
+    phi_filled, alpha_endo_deg, alpha_epi_deg,
 ):
     """Sanity-check diagnostics, printed only when verbose=True. Excludes a
     2-voxel boundary shell (one-sided-difference artifacts at the true mask
-    edge would otherwise show up as spurious orthogonality/norm failures)."""
+    edge would otherwise show up as spurious orthogonality/norm failures).
+
+    Takes the already-filled phi field (`phi_filled`) rather than the raw
+    `phi_c` + S_c pair, so it no longer recomputes `_fill_nan_nearest`
+    internally -- see PATCH NOTES at the top of this file.
+    """
     interior = binary_erosion(S_c, iterations=2)
     n_int = interior.sum()
 
@@ -262,7 +312,6 @@ def _print_sanity_checks(
     print(f"  [fibres] near-zero |grad psi|_perp   : {weak_el.sum()} / {n_int} "
           f"({100*weak_el.sum()/max(n_int,1):.2f}%)")
 
-    phi_filled = _fill_nan_nearest(phi_c, S_c)
     endo_band = interior & (phi_filled > 0.03) & (phi_filled < 0.10)
     epi_band  = interior & (phi_filled > 0.90) & (phi_filled < 0.97)
 

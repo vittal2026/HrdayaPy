@@ -33,6 +33,8 @@ vtk.vtkObject.GlobalWarningDisplayOff()
 from scipy.ndimage import gaussian_filter
 from skimage.measure import marching_cubes
 
+from .mesh_labelling import mm_step_size
+
 
 # =============================================================================
 # Helpers
@@ -143,6 +145,8 @@ def visualise_roi(
     S: np.ndarray,
     psi: np.ndarray,
     mesh_step: int = 2,
+    voxel_size: float = 0.4,
+    target_mm: float | None = 1.0,
 ) -> None:
     """
     Two-panel PyVista window:
@@ -155,9 +159,17 @@ def visualise_roi(
     query     : the same dict passed to build_roi_mask (for window title)
     S         : (Nx,Ny,Nz) bool   myocardium mask (for surface mesh)
     psi       : (Nx,Ny,Nz) float  apicobasal coordinate (for right panel)
-    mesh_step : marching-cubes step size
+    mesh_step : marching-cubes step size, in voxels. Only takes effect
+                when target_mm=None.
+    voxel_size, target_mm : target_mm (default 1.0mm) overrides mesh_step
+                with a physical-mm step size (see mesh_labelling.
+                mm_step_size) so this window doesn't get slower to build
+                purely because S was built at a finer voxel_size. Set
+                target_mm=None to use the literal mesh_step value instead.
     """
     print("\n  [query] Building surface mesh …")
+    if target_mm is not None:
+        mesh_step = mm_step_size(voxel_size, target_mm)
     Sp = np.pad(S.astype(np.uint8), 2, mode="constant")
     Sp = gaussian_filter(Sp.astype(float), sigma=0.8)
     verts, faces, _, _ = marching_cubes(Sp, level=0.5, step_size=mesh_step)

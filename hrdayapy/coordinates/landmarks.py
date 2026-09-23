@@ -22,6 +22,7 @@ def compute_landmarks(
     save_path,
     *,
     mesh_step: int = 2,
+    picking_mesh_step: int | None = None,
     apex_radius_mm: float = 6.0,
     basal_band_mm: float = 8.0,
 ):
@@ -39,7 +40,17 @@ def compute_landmarks(
     save_path         : landmarks are always written here as .npz
                          (required -- the picker result is not returned
                          without being saved)
-    mesh_step         : marching-cubes step size for the picking surface
+    mesh_step         : marching-cubes step size for the mesh the final
+                         apex/basal regions are voxelized on
+    picking_mesh_step : marching-cubes step size for a separate, coarser
+                         mesh used only for the interactive picking itself
+                         (defaults to max(mesh_step, 4)). Keep this at its
+                         default if you refine `S` (e.g. a finer
+                         TARGET_SPACING_MM) and notice basal-region picking
+                         getting slow -- that mesh no longer grows with
+                         `S`'s resolution. Pass mesh_step here to restore
+                         the old behaviour of picking directly on the
+                         final-resolution mesh.
     apex_radius_mm, basal_band_mm :
                          region size around each pick, in mm
 
@@ -63,6 +74,7 @@ def compute_landmarks(
 
     landmarks = pick_and_save_landmarks(
         S, save_path=tmp_path, mesh_step=mesh_step,
+        picking_mesh_step=picking_mesh_step,
         apex_radius_mm=apex_radius_mm,
         basal_band_mm=basal_band_mm,
     )

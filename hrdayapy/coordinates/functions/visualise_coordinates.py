@@ -67,85 +67,7 @@ from pathlib import Path
 
 import numpy as np
 import pyvista as pv
-from scipy.ndimage import distance_transform_edt, gaussian_filter, map_coordinates
-from skimage.measure import marching_cubes
-
-
-def _mask_field_to_surface(
-    mask: np.ndarray,
-    field: np.ndarray | None,
-    voxel_size: float = 1.0,
-    smooth_iter: int = 50,
-    pass_band: float = 0.1,
-    mask_sigma: float = 0.8,
-    nan_exclude_radius_vox: float = 1.5,
-) -> pv.PolyData | None:
-    """
-    Build the boundary surface of `mask` (voxel-index space), carrying
-    `field` along as a per-vertex scalar. Cells inside `mask` with a NaN
-    field value are kept in the mesh (so they render, just uncoloured) --
-    only voxels outside `mask` are dropped from the geometry.
-
-    Marching-cubes isosurface of a lightly Gaussian-blurred mask, instead
-    of a cell-thresholded voxel-cube surface, so Taubin smoothing actually
-    rounds the surface off rather than just softening stair-steps. See
-    plot_activation_maps.py, which this is ported from, for the full
-    rationale.
-    """
-    mask = mask.astype(bool)
-
-    Mp = np.pad(mask.astype(np.uint8), 2, mode="constant")
-    Mp = gaussian_filter(Mp.astype(float), sigma=mask_sigma)
-    if not np.any(Mp > 0.5):
-        return None
-
-    verts, faces, _, _ = marching_cubes(Mp, level=0.5)
-    verts -= 2.0
-
-    F = faces.shape[0]
-    vtk_faces = np.hstack([np.full((F, 1), 3, dtype=np.int64), faces]).ravel()
-    mesh = pv.PolyData(verts.astype(np.float32), vtk_faces)
-    if mesh.n_points == 0:
-        return None
-
-    if field is not None:
-        field = field.astype(np.float32)
-
-        # Inpaint NaNs with their nearest valid value first, so trilinear
-        # interpolation of the field has nothing to bleed off of, then
-        # re-mask any vertex too far from real data back to NaN (naive
-        # interpolation of the raw field would let NaNs wipe out far more
-        # of the surface than intended).
-        nan_mask = np.isnan(field)
-        if nan_mask.all():
-            field_filled = None
-        elif nan_mask.any():
-            dist_to_valid, nearest_idx = distance_transform_edt(
-                nan_mask, return_indices=True)
-            field_filled = field[tuple(nearest_idx)]
-        else:
-            field_filled = field
-            dist_to_valid = np.zeros(field.shape, dtype=np.float32)
-
-        if field_filled is not None:
-            sampled = map_coordinates(field_filled, verts.T, order=1, mode="nearest")
-            if nan_mask.any():
-                sampled_dist = map_coordinates(
-                    dist_to_valid.astype(np.float32), verts.T, order=1, mode="nearest")
-                sampled[sampled_dist > nan_exclude_radius_vox] = np.nan
-            mesh.point_data["field"] = sampled.astype(np.float32)
-
-    if smooth_iter > 0 and mesh.n_points > 0:
-        mesh = mesh.smooth_taubin(
-            n_iter=smooth_iter,
-            pass_band=pass_band,
-            boundary_smoothing=True,
-            feature_smoothing=False,
-            normalize_coordinates=True,
-        )
-
-    mesh.points *= voxel_size
-    return mesh
+from .mesh_viz_utils import mask_field_to_pv_surface as _mask_field_to_surface
 
 
 def visualise_coordinates(
@@ -159,6 +81,7 @@ def visualise_coordinates(
     mask_sigma: float = 0.8,
     nan_exclude_radius_vox: float = 1.5,
     voxel_size: float = 1.0,
+    target_mm: float = 1.0,
     nan_color: str = "gray",
     window_size: tuple[int, int] = (1600, 800),
     Z_theta: np.ndarray | None = None,
@@ -238,7 +161,7 @@ def visualise_coordinates(
     for (row, col), (name, field, mask, cmap, clim, title) in zip(positions, specs):
         plotter.subplot(row, col)
         mesh = _mask_field_to_surface(
-            mask, field, voxel_size=voxel_size,
+            mask, field, voxel_size=voxel_size, target_mm=target_mm,
             smooth_iter=smooth_surface_iter, pass_band=smooth_pass_band,
             mask_sigma=mask_sigma, nan_exclude_radius_vox=nan_exclude_radius_vox,
         )

@@ -845,6 +845,23 @@ def create_purkinje(
         dist_flag = True
         counter   = 1
 
+        # PATCH (2026-09-23): computed ONCE per terminal search, not once per
+        # rejected candidate draw. The old code called np.random.permutation
+        # (an O(n_pts) full reshuffle of the ENTIRE candidate array) inside
+        # this while loop, on every single attempt, just to read one element
+        # (rnd[i]) out of it -- a fresh permutation's element at a fixed
+        # position is uniformly random regardless, so this is statistically
+        # identical to the old behaviour, just without paying O(n_pts) per
+        # attempt. With n_pts in the hundreds of thousands to low millions
+        # (typical candidate counts here), and some chamber geometries
+        # needing many rejected attempts before d_crit clears d_thresh, the
+        # old placement could turn what should be a sub-second search into
+        # one that never visibly progresses -- this is what was behind the
+        # RV chamber appearing to hang indefinitely while LV completed
+        # normally (LV's geometry happened to need few rejections; RV's
+        # needed many, and each one cost a full reshuffle of ~1e6 points).
+        rnd = np.random.permutation(n_pts)
+
         while dist_flag:
             if counter >= 10:
                 d_thresh *= 0.9
@@ -857,7 +874,6 @@ def create_purkinje(
                     )
                 break
 
-            rnd  = np.random.permutation(n_pts)
             term = S[rnd[i], :]
             i   += 1
 

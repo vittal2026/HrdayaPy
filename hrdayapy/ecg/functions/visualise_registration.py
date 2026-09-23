@@ -43,11 +43,26 @@ os.environ["VTK_SILENCE_GET_VOID_POINTER_WARNINGS"] = "1"
 def _mask_to_pv_mesh(binary_vol: np.ndarray,
                      spacing:    np.ndarray,
                      origin:     np.ndarray,
-                     step:       int = 2):
-    """Marching-cubes surface → PyVista PolyData in physical mm."""
+                     step:       int = 2,
+                     target_mm:  float | None = 1.0):
+    """Marching-cubes surface → PyVista PolyData in physical mm.
+
+    step, target_mm : target_mm (default 1.0mm) overrides step with a
+        physical-mm step size, using spacing.mean() as the isotropic
+        voxel size (spacing here can be anisotropic; this is an
+        approximation for sizing the mesh only, not a correctness
+        concern -- see mesh_labelling.mm_step_size for the general
+        version of this idea). Set target_mm=None to use the literal
+        step value instead. Without this, step (a voxel count) makes
+        the extracted mesh get denser purely because binary_vol was
+        built at a finer spacing, regardless of whether that detail is
+        wanted for this registration check.
+    """
     from skimage.measure import marching_cubes
     import pyvista as pv
 
+    if target_mm is not None:
+        step = max(1, round(target_mm / float(np.mean(spacing))))
     verts, faces, _, _ = marching_cubes(
         binary_vol.astype(np.float32),
         level=0.5, step_size=step, allow_degenerate=False,
@@ -86,6 +101,7 @@ def visualise_registration(
     heart_label:       int   = 2,
     mc_step_torso:     int   = 2,
     mc_step_heart:     int   = 1,
+    mc_target_mm:      float | None = 1.0,
     vmin:              float = -85.0,
     vmax:              float =  35.0,
     cmap:              str   = "jet",
@@ -140,8 +156,8 @@ def visualise_registration(
     print("\n[viz] Building NRRD surfaces ...")
     volume, spacing, origin = _load_nrrd(torso_nrrd_path)
 
-    torso_mesh = _mask_to_pv_mesh(volume >= 1,           spacing, origin, step=mc_step_torso)
-    heart_mesh = _mask_to_pv_mesh(volume == heart_label, spacing, origin, step=mc_step_heart)
+    torso_mesh = _mask_to_pv_mesh(volume >= 1,           spacing, origin, step=mc_step_torso, target_mm=mc_target_mm)
+    heart_mesh = _mask_to_pv_mesh(volume == heart_label, spacing, origin, step=mc_step_heart, target_mm=mc_target_mm)
     print(f"  Torso: {torso_mesh.n_points:,} verts")
     print(f"  Heart: {heart_mesh.n_points:,} verts")
 

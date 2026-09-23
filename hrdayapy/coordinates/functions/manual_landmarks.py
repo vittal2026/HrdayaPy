@@ -77,7 +77,7 @@ from pathlib import Path
 from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import dijkstra
 
-from .mesh_labelling import extract_surface_mesh, face_geometry, voxelize_face_labels
+from .mesh_labelling import extract_surface_mesh, face_geometry, voxelize_face_labels, mm_step_size
 
 
 # =============================================================================
@@ -234,9 +234,18 @@ def region_around_vertices(verts, faces, seed_vertex_ids, radius_mm: float, grap
 def pick_and_save_landmarks(S: np.ndarray, save_path, mesh_step: int = 2,
                               apex_radius_mm: float = 6.0,
                               basal_band_mm: float = 8.0,
+                              voxel_size: float = 0.4,
+                              target_mm: float | None = 1.0,
                               verbose: bool = True):
     """
     Full interactive pick -> region -> voxelize -> cache pipeline.
+
+    mesh_step, voxel_size, target_mm : as in manual_stim_region.py's
+        pick_and_save_stim_region -- target_mm (default) overrides
+        mesh_step with a physical-mm step size, so the picking surface
+        doesn't get denser (and picking slower) purely because S was
+        built at a finer voxel_size. Set target_mm=None to use the
+        literal mesh_step value instead.
 
     Returns a dict:
         apex_voxels, basal_voxels   : (Nx,Ny,Nz) bool -- feed directly to
@@ -257,6 +266,8 @@ def pick_and_save_landmarks(S: np.ndarray, save_path, mesh_step: int = 2,
         return {k: z[k] for k in z.files}
 
     log("Extracting surface mesh ...")
+    if target_mm is not None:
+        mesh_step = mm_step_size(voxel_size, target_mm)
     verts, faces = extract_surface_mesh(S, step_size=mesh_step)
     mesh = _to_pyvista(verts, faces)
     graph = _vertex_adjacency(verts, faces)

@@ -35,8 +35,9 @@ from __future__ import annotations
 import numpy as np
 from pathlib import Path
 from scipy.spatial import cKDTree
+from scipy.ndimage import binary_erosion
 
-from .mesh_labelling import extract_surface_mesh
+from .mesh_labelling import extract_surface_mesh, mm_step_size
 from .manual_landmarks import pick_single_point, _to_pyvista
 
 
@@ -45,8 +46,22 @@ def _snap_to_nearest_true_voxel(point, S: np.ndarray) -> tuple[int, int, int]:
     Nearest voxel with S == True to an arbitrary (float) point in
     voxel-index space (e.g. a marching-cubes surface vertex, which sits
     between voxel centers rather than on one).
+
+    Restricted to S's surface shell (S & ~eroded(S)), not every True
+    voxel: a point picked on the marching-cubes surface can only ever be
+    nearest to a surface voxel, never an interior one, so this changes
+    nothing about the result. It does cut the KD-tree's point count from
+    O(volume) -- which scales roughly cubically in 1/voxel_size -- down
+    to O(surface area), roughly quadratic, which is the dominant cost of
+    picking at a fine mesh resolution otherwise.
     """
-    true_voxels = np.argwhere(S)
+    shell = S & ~binary_erosion(S)
+    if not shell.any():
+        shell = S   # degenerate case (S is 1 voxel thick or empty) --
+                     # fall back to the old full-volume behaviour rather
+                     # than raising on an edge case that isn't this
+                     # function's to solve
+    true_voxels = np.argwhere(shell)
     if true_voxels.size == 0:
         raise RuntimeError("S has no True voxels -- nothing to snap to.")
     tree = cKDTree(true_voxels)
@@ -86,6 +101,7 @@ def pick_and_save_stim_region(S: np.ndarray, save_path, *,
                                radius_mm: float = 5.0,
                                voxel_size: float = 0.4,
                                mesh_step: int = 2,
+                               target_mm: float | None = 1.0,
                                verbose: bool = True) -> np.ndarray:
     """
     Full interactive pick -> grow -> save pipeline for a point-based
@@ -99,7 +115,15 @@ def pick_and_save_stim_region(S: np.ndarray, save_path, *,
     radius_mm   : radius of the grown region around the picked point, in mm
     voxel_size  : mm per voxel (isotropic), for converting radius_mm to
                   voxel units -- match whatever compute_coupled will use
-    mesh_step   : marching-cubes step size for the picking surface
+    mesh_step   : marching-cubes step size for the picking surface, in
+                  voxels. Only takes effect when target_mm=None; see
+                  target_mm below (the default) otherwise.
+    target_mm   : marching-cubes step size for the picking surface, in mm
+                  instead of voxels (see mm_step_size). Overrides
+                  mesh_step. None disables this and uses the literal
+                  mesh_step value instead -- set this if you need a
+                  denser picking surface than 1 mm, or want the old
+                  behaviour back.
 
     Returns
     -------
@@ -112,6 +136,8 @@ def pick_and_save_stim_region(S: np.ndarray, save_path, *,
     save_path = Path(save_path).with_suffix(".npy")
 
     log("Extracting surface mesh ...")
+    if target_mm is not None:
+        mesh_step = mm_step_size(voxel_size, target_mm)
     verts, faces = extract_surface_mesh(S, step_size=mesh_step)
     mesh = _to_pyvista(verts, faces)
 

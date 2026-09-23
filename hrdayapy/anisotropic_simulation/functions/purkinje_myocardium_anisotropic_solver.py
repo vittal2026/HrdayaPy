@@ -1339,6 +1339,19 @@ def purkinje_myocardium_anisotropic_solver(
     cg_tol:       float = 1e-5,
     cg_max_iter:  int   = 100,
     n_frames:     int   = 100,
+    frame_save_dt: float | None = None,  # sampling interval [ms] for the
+                                          # animation output (surf_frames /
+                                          # branch_* / time in out_npz).
+                                          # Overrides n_frames when given, so
+                                          # cadence stays fixed as T grows
+                                          # instead of spreading n_frames
+                                          # evenly across the whole run (which
+                                          # gets coarser the longer T is).
+                                          # None (default) keeps the old
+                                          # n_frames behaviour.
+    anim_tmp_dir: str | Path | None = None,  # scratch dir for the animation
+                                              # frames' on-disk buffer; None ->
+                                              # same directory as out_npz
     device:       str | None = None,
     dtype:        torch.dtype = torch.float64,
     out_npz:      str | Path | None = None,
@@ -1429,10 +1442,25 @@ def purkinje_myocardium_anisotropic_solver(
     phi_endo_max : phi threshold below which nodes get endocardial TTP06
     phi_epi_min  : phi threshold above which nodes get epicardial TTP06
                    (nodes between the two thresholds get M-cell TTP06)
+    n_frames     : number of animation frames (surf_frames/branch_*/time in
+                   out_npz), spread evenly across [0, T]. Simple default for
+                   short runs; for long runs the resulting cadence (T /
+                   n_frames) gets coarser the bigger T is -- use
+                   `frame_save_dt` instead when T varies or is long.
+    frame_save_dt : animation sampling interval [ms], as an interval instead
+                   of a count. When given, overrides n_frames so the cadence
+                   is `frame_save_dt` regardless of T (e.g. always every
+                   5 ms, whether T is 2 s or 30 min). Backed by the same
+                   on-disk memmap pattern as vm_save_dt below, so RAM stays
+                   flat even at a fine interval over a long run -- prefer
+                   this over raising n_frames for long/fine-cadence runs.
+                   None (default) leaves n_frames in charge.
+    anim_tmp_dir  : scratch directory for the animation frame buffer during
+                   the run. None (default) -> same directory as out_npz.
     vm_save_dt   : Vm snapshot sampling interval [ms].  A snapshot of the full
                    myocardial Vm field is written every `vm_save_dt` ms,
-                   independently of `n_frames` / the animation output.
-                   None (default) disables this output entirely.
+                   independently of `n_frames`/`frame_save_dt` (the animation
+                   output). None (default) disables this output entirely.
     out_vm_npz   : path for the Vm snapshot NPZ.  Required when vm_save_dt is
                    set; silently ignored otherwise.
                    NPZ schema — see `_save_vm_snapshots` for full details:
@@ -1589,7 +1617,12 @@ def purkinje_myocardium_anisotropic_solver(
 
     # ── Timing ───────────────────────────────────────────────────────────────
     n_steps    = int(T / dt)
-    save_every = max(1, n_steps // n_frames)
+    if frame_save_dt is not None:
+        save_every = max(1, int(round(frame_save_dt / dt)))
+        print(f"  Animation frames : every {save_every} steps "
+              f"= {save_every * dt:.4g} ms  (requested {frame_save_dt} ms)")
+    else:
+        save_every = max(1, n_steps // n_frames)
 
     # ── Ionic state — initialised by HeteroIonicSolver ───────────────────────
     states = ionic.init_states(N_global)
@@ -1605,11 +1638,35 @@ def purkinje_myocardium_anisotropic_solver(
     )
     I_stim_buf = torch.zeros(N_global, dtype=dtype, device=dev)   # reused every step
 
-    # ── Frame storage (CPU) ───────────────────────────────────────────────────
-    branch_bmaps    = [np.array(bm, dtype=np.int32) for bm in branch_map]
-    branch_frames_p = [[] for _ in branch_map]
-    frames_surf     = []
+    # ── Frame storage (on-disk memmap) ─────────────────────────────────────────
+    # Same rationale as the Vm snapshot buffer below: at a fine frame_save_dt
+    # over a long T, a Python list + np.stack at the end needs 2-3x the final
+    # array size in RAM at the moment of stacking. Writing straight into a
+    # pre-sized on-disk memmap keeps RAM flat regardless of frame count.
+    branch_bmaps       = [np.array(bm, dtype=np.int32) for bm in branch_map]
+    _n_anim_frames_max = (n_steps + save_every - 1) // save_every
+    _anim_tmp_dir = Path(anim_tmp_dir) if anim_tmp_dir is not None else \
+        (Path(out_npz).parent if out_npz is not None else Path("."))
+    _anim_tmp_dir.mkdir(parents=True, exist_ok=True)
+
+    def _new_anim_memmap(n_cols: int):
+        fh = tempfile.NamedTemporaryFile(
+            dir=str(_anim_tmp_dir), suffix=".anim_scratch.npy", delete=False)
+        tmp_path = Path(fh.name)
+        fh.close()
+        arr = np.lib.format.open_memmap(
+            str(tmp_path), mode="w+", dtype=np.float32,
+            shape=(_n_anim_frames_max, n_cols))
+        return arr, tmp_path
+
+    frames_surf, _surf_tmp_path = _new_anim_memmap(len(myo["surface_node_ids"]))
+    branch_frames_p, _branch_tmp_paths = [], []
+    for bmap in branch_bmaps:
+        arr, tmp_path = _new_anim_memmap(len(bmap))
+        branch_frames_p.append(arr)
+        _branch_tmp_paths.append(tmp_path)
     times           = []
+    _anim_frame_count = 0
 
     # ── Vm volumetric snapshot setup ─────────────────────────────────────────
     # Independent sampling rate: one full-myo Vm snapshot every vm_save_dt ms.
@@ -1739,10 +1796,11 @@ def purkinje_myocardium_anisotropic_solver(
                 V_p_cpu = V_cpu[:Np]
                 V_m_cpu = V_cpu[Np:]
                 for b, bmap in enumerate(branch_bmaps):
-                    branch_frames_p[b].append(V_p_cpu[bmap].astype(np.float32))
-                frames_surf.append(
-                    V_m_cpu[myo["surface_node_ids"]].astype(np.float32))
+                    branch_frames_p[b][_anim_frame_count] = V_p_cpu[bmap].astype(np.float32)
+                frames_surf[_anim_frame_count] = \
+                    V_m_cpu[myo["surface_node_ids"]].astype(np.float32)
                 times.append(t)
+                _anim_frame_count += 1
 
             # ── Vm volumetric snapshot ────────────────────────────────────────
             if _run_vm and (step_i % vm_save_every == 0):
@@ -1786,6 +1844,16 @@ def purkinje_myocardium_anisotropic_solver(
         except OSError:
             pass   # scratch file cleanup is best-effort; not fatal
 
+    # ── Trim animation frame buffers to what was actually written ──────────────
+    # (n_steps rounding can leave the preallocated buffer 1 row longer than
+    # what was filled.) Views, not copies -- still backed by the on-disk
+    # memmaps until _save_npz streams them out.
+    frames_surf.flush()
+    for arr in branch_frames_p:
+        arr.flush()
+    frames_surf     = frames_surf[:_anim_frame_count]
+    branch_frames_p = [arr[:_anim_frame_count] for arr in branch_frames_p]
+
     # ── Pack results ──────────────────────────────────────────────────────────
     results = dict(
         comp_nodes        = comp_nodes_p,
@@ -1801,6 +1869,14 @@ def purkinje_myocardium_anisotropic_solver(
 
     if out_npz is not None:
         _save_npz(results, out_npz)
+
+    # NOTE: unlike the Vm snapshot buffer, frames_surf/branch_frames_p are
+    # part of the returned `results` dict (pre-existing behaviour, kept for
+    # backward compatibility) -- so, unlike vm_frames, their scratch files
+    # are deliberately NOT deleted here: results["frames_surf"] etc. are
+    # memmap views still backed by them. They live in anim_tmp_dir (default:
+    # next to out_npz) as *.anim_scratch.npy and are yours to delete once
+    # you're done with `results` -- they are not cleaned up automatically.
 
     return results
 
@@ -1819,13 +1895,18 @@ def _save_npz(results: dict, path: str | Path) -> None:
         "surf_verts":        results["surf_verts"],
         "surf_faces":        results["surf_faces"],
         "vert_to_surf_node": results["vert_to_surf_node"],
-        "surf_frames":       np.stack(results["frames_surf"],    axis=0).astype(np.float32),
+        # frames_surf/branch_* are already (n_frames, n_cols) float32 arrays
+        # (memmap views, in the long-run/frame_save_dt case) -- np.asarray
+        # with copy=False is a no-op when the dtype already matches, same
+        # streaming rationale as _save_vm_snapshots below, so a multi-GiB
+        # animation buffer isn't doubled in RAM here.
+        "surf_frames":       np.asarray(results["frames_surf"], dtype=np.float32, order="C"),
     }
 
     for b, bmap in enumerate(results["branch_map"]):
         save_dict[f"bmap_{b}"]   = np.array(bmap, dtype=np.int32)
-        save_dict[f"branch_{b}"] = np.stack(
-            results["branch_frames_p"][b], axis=0).astype(np.float32)
+        save_dict[f"branch_{b}"] = np.asarray(
+            results["branch_frames_p"][b], dtype=np.float32, order="C")
 
     np.savez_compressed(str(path), **save_dict)
     size_mb = os.path.getsize(path) / 1024 ** 2

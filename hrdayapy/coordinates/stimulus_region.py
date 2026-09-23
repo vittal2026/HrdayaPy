@@ -84,6 +84,7 @@ def compute_stim_region_from_point(
     radius_mm: float = 5.0,
     voxel_size: float = 0.4,
     mesh_step: int = 2,
+    target_mm: float | None = 1.0,
 ):
     """
     Interactively pick a point on the myocardium surface and grow a
@@ -103,7 +104,17 @@ def compute_stim_region_from_point(
     radius_mm   : radius of the grown region around the picked point, in mm
     voxel_size  : mm per voxel (isotropic) -- match whatever
                   compute_coupled will be called with
-    mesh_step   : marching-cubes step size for the picking surface
+    mesh_step   : marching-cubes step size for the picking surface, in
+                  voxels. Only takes effect when target_mm=None.
+    target_mm   : marching-cubes step size for the picking surface, in mm
+                  instead of voxels -- overrides mesh_step. None uses the
+                  literal mesh_step value instead. See
+                  coordinates.mm_step_size / manual_stim_region.py's
+                  pick_and_save_stim_region for why this exists: a
+                  voxel-count step_size makes the picking surface (and
+                  everything built on it) get denser -- and slower --
+                  the finer voxel_size is, unrelated to whether that
+                  detail is wanted.
 
     Returns
     -------
@@ -122,7 +133,7 @@ def compute_stim_region_from_point(
 
     region = pick_and_save_stim_region(
         S, save_path=tmp_path, radius_mm=radius_mm,
-        voxel_size=voxel_size, mesh_step=mesh_step,
+        voxel_size=voxel_size, mesh_step=mesh_step, target_mm=target_mm,
     )
 
     tmp_path.replace(save_path)
@@ -148,6 +159,7 @@ def compute_stim_regions_from_points(
     radius_mm: float = 5.0,
     voxel_size: float = 0.4,
     mesh_step: int = 2,
+    target_mm: float | None = 1.0,
 ):
     """
     Multi-site counterpart of compute_stim_region_from_point: opens one
@@ -186,6 +198,7 @@ def compute_stim_regions_from_points(
         regions[name] = compute_stim_region_from_point(
             S, save_path=save_dir / f"{name}_stim_region.npy",
             radius_mm=radius_mm, voxel_size=voxel_size, mesh_step=mesh_step,
+            target_mm=target_mm,
         )
     return regions
 

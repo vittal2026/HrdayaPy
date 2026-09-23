@@ -66,6 +66,34 @@ from collections import defaultdict
 # 1. Mesh extraction
 # =============================================================================
 
+def mm_step_size(voxel_size_mm: float, target_mm: float = 1.0) -> int:
+    """
+    Voxel-unit step_size for marching_cubes that keeps the *physical*
+    mesh resolution roughly constant (~target_mm per triangle edge) as
+    voxel_size_mm shrinks. A literal voxel-count step_size (the old
+    default everywhere in this package) does the opposite: its physical
+    resolution gets finer -- and its triangle count, smoothing cost, and
+    downstream picking/rendering cost along with it -- automatically as
+    voxel_size_mm shrinks, whether or not that detail is wanted.
+
+    target_mm=1.0 (default) is plenty fine for interactive picking or a
+    sanity-check plot -- a person clicking a point, or eyeballing a
+    region against the anatomy, can't tell a 1 mm mesh from a 0.2 mm
+    one. Lower it only if you need genuinely fine visual detail.
+
+    Does not by itself reduce the cost of scanning the input array --
+    marching_cubes still visits every voxel of S regardless of
+    step_size. This caps how dense the *output* mesh (and everything
+    built on top of it) gets, which is the dominant cost for a
+    reasonably-sized heart mesh; if the base scan cost also matters at
+    your resolution, that needs pre-downsampling S itself, which this
+    function deliberately does not do for you (it would lose fine
+    boundary detail, which changing the extracted mesh's density alone
+    does not).
+    """
+    return max(1, int(round(target_mm / voxel_size_mm)))
+
+
 def extract_surface_mesh(S: np.ndarray, step_size: int = 2):
     """
     Marching-cubes surface of a binary mask, with outward-pointing,
@@ -804,7 +832,9 @@ def voxelize_face_labels(S, verts, faces, face_masks: dict, return_nearest_face=
 
 def label_ventricle_mesh(S: np.ndarray, mesh_step: int = 2, apex_cap_frac: float = 0.01,
                            base_cap_frac: float = 0.01, psi=None,
-                           basal_psi_threshold: float = 0.97, verbose: bool = True):
+                           basal_psi_threshold: float = 0.97,
+                           voxel_size: float = 0.4, target_mm: float | None = 1.0,
+                           verbose: bool = True):
     """
     Full robust labelling pipeline for a single fused-myocardium binary
     mask. See module docstring for the algorithm; see README for how this
@@ -857,6 +887,11 @@ def label_ventricle_mesh(S: np.ndarray, mesh_step: int = 2, apex_cap_frac: float
             print(f"  [mesh_labelling] {msg}")
 
     log("Extracting surface mesh ...")
+    if target_mm is not None:
+        mesh_step = mm_step_size(voxel_size, target_mm)   # see mm_step_size's
+                                                            # docstring; overrides
+                                                            # mesh_step unless
+                                                            # target_mm=None
     verts, faces = extract_surface_mesh(S, step_size=mesh_step)
     centroids, normals, areas = face_geometry(verts, faces)
     log(f"{verts.shape[0]:,} vertices, {faces.shape[0]:,} faces")
@@ -949,6 +984,7 @@ def label_ventricle_mesh(S: np.ndarray, mesh_step: int = 2, apex_cap_frac: float
 def relabel_lv_rv_with_psi(S: np.ndarray, psi: np.ndarray, surface_label: np.ndarray,
                              mesh_step: int = 2, apex_cap_frac: float = 0.01,
                              base_cap_frac: float = 0.01, basal_psi_threshold: float = 0.97,
+                             voxel_size: float = 0.4, target_mm: float | None = 1.0,
                              long_axis_hint=None, verbose: bool = True):
     """
     Redo just the LV/RV endocardial split with the psi-based basal cut
@@ -997,7 +1033,35 @@ def relabel_lv_rv_with_psi(S: np.ndarray, psi: np.ndarray, surface_label: np.nda
 
     log("Re-extracting surface mesh (must match the mesh_step used to "
         "produce the cached surface_label) ...")
+    if target_mm is not None:
+        mesh_step = mm_step_size(voxel_size, target_mm)   # see mm_step_size's
+                                                            # docstring; overrides
+                                                            # mesh_step unless
+                                                            # target_mm=None.
+                                                            # IMPORTANT: this must
+                                                            # come out the same as
+                                                            # whatever label_ventri-
+                                                            # cle_mesh used to build
+                                                            # surface_label -- pass
+                                                            # the same voxel_size/
+                                                            # target_mm (or the same
+                                                            # literal mesh_step, with
+                                                            # target_mm=None) to both
+                                                            # calls, or the two
+                                                            # meshes won't line up
+                                                            # and the check below
+                                                            # will catch it.
     verts, faces = extract_surface_mesh(S, step_size=mesh_step)
+    if faces.shape[0] != len(surface_label):
+        raise ValueError(
+            f"Re-extracted mesh has {faces.shape[0]:,} faces but "
+            f"surface_label has {len(surface_label):,} entries -- they "
+            f"don't match, so this mesh isn't the one surface_label was "
+            f"computed for. Likely cause: this call's effective mesh_step "
+            f"({mesh_step}) differs from label_ventricle_mesh's. If you're "
+            f"using target_mm (the default), pass the same voxel_size to "
+            f"both calls; otherwise pass the same mesh_step to both with "
+            f"target_mm=None.")
     centroids, normals, areas = face_geometry(verts, faces)
     log(f"{verts.shape[0]:,} vertices, {faces.shape[0]:,} faces")
 

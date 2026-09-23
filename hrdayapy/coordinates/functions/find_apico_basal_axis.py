@@ -1,12 +1,16 @@
-import numpy as np
+]import numpy as np
 import pyvista as pv
 from scipy.ndimage import label
+
+from .mesh_viz_utils import mask_to_pv_surface
 
 
 def find_apico_basal_axis(
     S,
     min_area=100,
-    plot=False
+    plot=False,
+    voxel_size: float = 0.4,
+    target_mm: float = 1.0,
 ):
     """
     Determine the apico-basal axis from a binary myocardium mask.
@@ -70,18 +74,11 @@ def find_apico_basal_axis(
         p0 = centroid - length * direction
         p1 = centroid + length * direction
 
-        # PyVista volume (for context)
-        grid = pv.ImageData()
-        grid.dimensions = np.array(S.shape) + 1
-        grid.spacing = (1, 1, 1)
-        grid.origin = (0, 0, 0)
-        grid.cell_data["mask"] = S.astype(np.uint8).flatten(order="F")
-
-        surface = (
-            grid.threshold(0.5, scalars="mask")
-                .extract_surface()
-                .smooth(n_iter=20, relaxation_factor=0.1)
-        )
+        # PyVista volume (for context) -- Taubin-smoothed; replaces the old
+        # per-voxel-cell ImageData()+threshold()+Laplacian .smooth() (see
+        # mesh_viz_utils.mask_to_pv_surface docstring)
+        surface = mask_to_pv_surface(S, voxel_size=voxel_size, target_mm=target_mm,
+                                      smooth_iter=20, pass_band=0.1)
 
         axis_line = pv.Line(p0, p1)
 

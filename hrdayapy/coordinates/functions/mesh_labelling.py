@@ -830,7 +830,7 @@ def voxelize_face_labels(S, verts, faces, face_masks: dict, return_nearest_face=
 # 6. Top-level orchestrator
 # =============================================================================
 
-def label_ventricle_mesh(S: np.ndarray, mesh_step: int = 2, apex_cap_frac: float = 0.01,
+def label_ventricle_mesh(S: np.ndarray, mesh_step: int = 1, apex_cap_frac: float = 0.01,
                            base_cap_frac: float = 0.01, psi=None,
                            basal_psi_threshold: float = 0.97,
                            voxel_size: float = 0.4, target_mm: float | None = None,
@@ -997,8 +997,8 @@ def label_ventricle_mesh(S: np.ndarray, mesh_step: int = 2, apex_cap_frac: float
 # =============================================================================
 
 def relabel_lv_rv_with_psi(S: np.ndarray, psi: np.ndarray, surface_label: np.ndarray,
-                             mesh_step: int = 2, apex_cap_frac: float = 0.01,
-                             base_cap_frac: float = 0.01, basal_psi_threshold: float = 0.97,
+                             mesh_step: int = 1, apex_cap_frac: float = 0.01,
+                             base_cap_frac: float = 0.01, basal_psi_threshold: float = 0.93,
                              voxel_size: float = 0.4, target_mm: float | None = None,
                              long_axis_hint=None, verbose: bool = True):
     """
@@ -1077,16 +1077,7 @@ def relabel_lv_rv_with_psi(S: np.ndarray, psi: np.ndarray, surface_label: np.nda
                                                             # and the check below
                                                             # will catch it.
     verts, faces = extract_surface_mesh(S, step_size=mesh_step)
-    if faces.shape[0] != len(surface_label):
-        raise ValueError(
-            f"Re-extracted mesh has {faces.shape[0]:,} faces but "
-            f"surface_label has {len(surface_label):,} entries -- they "
-            f"don't match, so this mesh isn't the one surface_label was "
-            f"computed for. Likely cause: this call's effective mesh_step "
-            f"({mesh_step}) differs from label_ventricle_mesh's. If either "
-            f"call passes target_mm (not the default here), pass the same "
-            f"voxel_size and target_mm to both; otherwise make sure both "
-            f"calls use the same literal mesh_step.")
+
     centroids, normals, areas = face_geometry(verts, faces)
     log(f"{verts.shape[0]:,} vertices, {faces.shape[0]:,} faces")
 

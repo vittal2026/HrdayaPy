@@ -21,7 +21,7 @@ def compute_landmarks(
     S,
     save_path,
     *,
-    mesh_step: int = 2,
+    mesh_step: int = 1,
     picking_mesh_step: int | None = None,
     apex_radius_mm: float = 6.0,
     basal_band_mm: float = 8.0,
@@ -73,8 +73,8 @@ def compute_landmarks(
         tmp_path.unlink()
 
     landmarks = pick_and_save_landmarks(
-        S, save_path=tmp_path, mesh_step=mesh_step,
-        picking_mesh_step=picking_mesh_step,
+        S, save_path=tmp_path,
+        mesh_step=picking_mesh_step,
         apex_radius_mm=apex_radius_mm,
         basal_band_mm=basal_band_mm,
     )

@@ -1,4 +1,4 @@
-]"""
+"""
 plot_stimulus_region.py
 ========================
 Highlights a stimulus region (e.g. from select_coordinate_region) on

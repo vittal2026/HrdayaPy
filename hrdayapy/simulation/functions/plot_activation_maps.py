@@ -44,7 +44,7 @@ from pathlib import Path
 import numpy as np
 import pyvista as pv
 
-from .mesh_viz_utils import mask_field_to_pv_surface as _mask_field_to_surface
+from ...coordinates.functions.mesh_viz_utils import mask_field_to_pv_surface as _mask_field_to_surface
 
 
 

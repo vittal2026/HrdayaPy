@@ -20,7 +20,7 @@ def compute_psi(
     basal_mask,
     *,
     apex_percent: float = 0.10,
-    max_iter: int = 40,
+    max_iter: int = 400,
     tol: float = 1e-5,
     device=None,
     save_path=None,

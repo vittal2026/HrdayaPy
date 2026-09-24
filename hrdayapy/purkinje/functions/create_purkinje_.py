@@ -869,32 +869,8 @@ def create_purkinje(
 
             if i >= n_pts:
                 if verbose:
-                    # Diagnostic (2026-09-23): loop-based (not broadcast) so
-                    # memory stays O(n_pts) regardless of how many segments
-                    # exist yet -- this reports whether [min_seg_length,
-                    # max_seg_length] is geometrically reachable at all from
-                    # here, rather than us continuing to guess at values.
-                    node_dists = np.full(n_pts, np.inf)
-                    for node in dist:
-                        node_dists = np.minimum(
-                            node_dists, np.linalg.norm(S - node, axis=1)
-                        )
-                    in_band = (
-                        (node_dists >= min_seg_length)
-                        & (node_dists <= max_seg_length)
-                    )
                     tqdm.write(
-                        f"   Warning: ran out of candidates at {k_term} terminals\n"
-                        f"     Diagnostic -- distance from all {n_pts} remaining "
-                        f"candidates to the nearest existing tree node:\n"
-                        f"       min={node_dists.min():.1f}  "
-                        f"max={node_dists.max():.1f}  "
-                        f"median={np.median(node_dists):.1f} voxels\n"
-                        f"       required band: [{min_seg_length}, {max_seg_length}] "
-                        f"voxels -- {int(in_band.sum())} / {n_pts} candidates fall "
-                        f"inside it\n"
-                        f"       d_thresh at give-up: {d_thresh:.2f} voxels "
-                        f"(started this terminal at {ld / np.sqrt(k_term):.1f})"
+                        f"   Warning: ran out of candidates at {k_term} terminals"
                     )
                 break
 
